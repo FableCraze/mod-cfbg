@@ -2,7 +2,24 @@
 #ifndef CFBG_APPEARANCE_H
 #define CFBG_APPEARANCE_H
 #include "WorldPacket.h"
+#include "CryptoRandom.h"
 #include <array>
+#include <bit>
+#include <limits>
+
+inline std::size_t ChooseCFBGVisualIndex(std::size_t count)
+{
+    if (!count) return 0;
+    uint64 const range = uint64{std::numeric_limits<uint32>::max()} + 1;
+    uint64 const limit = range - range % count;
+    uint32 sample = 0;
+    // Reject the incomplete range so every valid race has equal probability.
+    do
+    {
+        sample = std::bit_cast<uint32>(SkyFire::Crypto::GetRandomBytes<sizeof(uint32)>());
+    } while (sample >= limit);
+    return sample % count;
+}
 
 struct CFBGVisualData
 {

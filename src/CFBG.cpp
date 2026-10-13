@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
-#include <random>
 #include <fstream>
 #include <vector>
 
@@ -324,10 +323,7 @@ uint8 CFBG::ChooseVisualRace(Player* p, TeamId team)
     std::vector<uint8> choices;
     for (auto const& race : VisualRaces) if (ValidRace(p, race.first, team)) choices.push_back(race.first);
     if (choices.empty()) return 0;
-    // Cosmetic race selection only: this generator never controls tokens,
-    // rewards, permissions, or team allocation and need not be cryptographic.
-    static thread_local std::mt19937 random(std::random_device{}());
-    return choices[std::uniform_int_distribution<size_t>(0, choices.size()-1)(random)];
+    return choices[ChooseCFBGVisualIndex(choices.size())];
 }
 void CFBG::Apply(Player* p, TeamId team, bool battlefield)
 {
