@@ -53,47 +53,47 @@ CFBG& CFBG::Instance() { static CFBG instance; return instance; }
 
 void CFBG::LoadConfig()
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     std::string path = sConfigMgr->GetFilename();
     size_t slash = path.find_last_of("/\\");
     path = slash == std::string::npos ? "" : path.substr(0, slash + 1);
     // The .dist file documents defaults. Only an explicitly installed .conf is loaded.
     if (std::ifstream(path + "CFBG.conf").good()) sConfigMgr->LoadMore((path + "CFBG.conf").c_str());
-    _enabled = sConfigMgr->GetBoolDefault("CFBG.Enable", false);
-    _wgEnabled = sConfigMgr->GetBoolDefault("CFBG.Battlefield.Enable", true);
-    _wgLock = sConfigMgr->GetBoolDefault("CFBG.Battlefield.TeamLock.Enable", true);
-    _wgPriority = sConfigMgr->GetBoolDefault("CFBG.Battlefield.NativePriority.Enable", true);
-    _wgResurrect = sConfigMgr->GetBoolDefault("CFBG.Battlefield.ReapplyOnResurrect.Enable", true);
-    _levels = sConfigMgr->GetBoolDefault("CFBG.BalancedTeams", true);
-    _items = sConfigMgr->GetBoolDefault("CFBG.Include.Avg.Ilvl.Enable", false);
-    _hunters = sConfigMgr->GetBoolDefault("CFBG.BalancedTeams.Class.LowLevel", false);
-    _even = sConfigMgr->GetBoolDefault("CFBG.EvenTeams.Enabled", false);
-    _random = sConfigMgr->GetBoolDefault("CFBG.RandomRaceSelection", true);
-    _entry = sConfigMgr->GetBoolDefault("CFBG.BalanceTeamsOnEntry.Enabled", true);
-    _start = sConfigMgr->GetBoolDefault("CFBG.BalanceTeamsAtStart.Enabled", true);
-    _cooldowns = sConfigMgr->GetBoolDefault("CFBG.ResetCooldowns", false);
-    _showPlayerName = sConfigMgr->GetBoolDefault("CFBG.Show.PlayerName", false);
-    _groupLimit = std::max(1u, UnsignedConfig("CFBG.Players.Count.In.Group", 3));
-    _evenThreshold = UnsignedConfig("CFBG.EvenTeams.MaxPlayersThreshold", 0);
-    _hunterMin = UnsignedConfig("CFBG.BalancedTeams.Class.MinLevel", 10);
-    _hunterMax = UnsignedConfig("CFBG.BalancedTeams.Class.MaxLevel", 19);
-    _hunterDiff = UnsignedConfig("CFBG.BalancedTeams.Class.LevelDiff", 2);
-    _skipClasses.clear();
+    _bgConfig.enabled = sConfigMgr->GetBoolDefault("CFBG.Enable", false);
+    _bfConfig.enabled = sConfigMgr->GetBoolDefault("CFBG.Battlefield.Enable", true);
+    _bfConfig.lock = sConfigMgr->GetBoolDefault("CFBG.Battlefield.TeamLock.Enable", true);
+    _bfConfig.priority = sConfigMgr->GetBoolDefault("CFBG.Battlefield.NativePriority.Enable", true);
+    _bfConfig.resurrect = sConfigMgr->GetBoolDefault("CFBG.Battlefield.ReapplyOnResurrect.Enable", true);
+    _bgConfig.levels = sConfigMgr->GetBoolDefault("CFBG.BalancedTeams", true);
+    _bgConfig.items = sConfigMgr->GetBoolDefault("CFBG.Include.Avg.Ilvl.Enable", false);
+    _bgConfig.hunters = sConfigMgr->GetBoolDefault("CFBG.BalancedTeams.Class.LowLevel", false);
+    _bgConfig.even = sConfigMgr->GetBoolDefault("CFBG.EvenTeams.Enabled", false);
+    _bgConfig.random = sConfigMgr->GetBoolDefault("CFBG.RandomRaceSelection", true);
+    _bgConfig.entry = sConfigMgr->GetBoolDefault("CFBG.BalanceTeamsOnEntry.Enabled", true);
+    _bgConfig.start = sConfigMgr->GetBoolDefault("CFBG.BalanceTeamsAtStart.Enabled", true);
+    _bgConfig.cooldowns = sConfigMgr->GetBoolDefault("CFBG.ResetCooldowns", false);
+    _bgConfig.showPlayerName = sConfigMgr->GetBoolDefault("CFBG.Show.PlayerName", false);
+    _bgConfig.groupLimit = std::max(1u, UnsignedConfig("CFBG.Players.Count.In.Group", 3));
+    _bgConfig.evenThreshold = UnsignedConfig("CFBG.EvenTeams.MaxPlayersThreshold", 0);
+    _bgConfig.hunterMin = UnsignedConfig("CFBG.BalancedTeams.Class.MinLevel", 10);
+    _bgConfig.hunterMax = UnsignedConfig("CFBG.BalancedTeams.Class.MaxLevel", 19);
+    _bgConfig.hunterDiff = UnsignedConfig("CFBG.BalancedTeams.Class.LevelDiff", 2);
+    _bfConfig.skipClasses.clear();
     std::string skip = sConfigMgr->GetStringDefault("CFBG.Battlefield.SkipClasses", "");
-    std::replace(skip.begin(), skip.end(), ',', ' ');
+    std::ranges::replace(skip, ',', ' ');
     std::istringstream input(skip); unsigned c;
-    while (input >> c) if (c > 0 && c < MAX_CLASSES) _skipClasses.insert(uint8(c));
-    SF_LOG_INFO("module.cfbg", "CFBG %s; existing invitations and war assignments drain normally on disable.", _enabled ? "enabled" : "disabled");
+    while (input >> c) if (c > 0 && c < MAX_CLASSES) _bfConfig.skipClasses.insert(uint8(c));
+    SF_LOG_INFO("module.cfbg", "CFBG %s; existing invitations and war assignments drain normally on disable.", _bgConfig.enabled ? "enabled" : "disabled");
 }
 
 void CFBG::MoveQueueGroup(BattlegroundQueue* queue, uint8 bracket, GroupQueueInfo* group, uint32 team)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (group->Team == team) return;
     for (unsigned i = 0; i < BG_QUEUE_GROUP_TYPES_COUNT; ++i)
     {
         auto& list = queue->m_QueuedGroups[bracket][i];
-        auto itr = std::find(list.begin(), list.end(), group);
+        auto itr = std::ranges::find(list, group);
         if (itr == list.end()) continue;
         unsigned target = (i < BG_TEAMS_COUNT ? 0 : BG_TEAMS_COUNT) + unsigned(TeamIndex(team));
         queue->m_QueuedGroups[bracket][target].push_back(group);
@@ -105,20 +105,20 @@ void CFBG::MoveQueueGroup(BattlegroundQueue* queue, uint8 bracket, GroupQueueInf
 
 bool CFBG::SelectGroups(BattlegroundQueue* queue, Battleground* bg, uint8 bracket, uint32 minimum, uint32 maximum, bool fill)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (bg->isArena()) return false;
     std::vector<GroupQueueInfo*> groups;
     for (unsigned i = 0; i < BG_QUEUE_GROUP_TYPES_COUNT; ++i)
         for (GroupQueueInfo* g : queue->m_QueuedGroups[bracket][i])
             if (!g->ArenaType && !g->IsRated && !g->IsInvitedToBGInstanceGUID) groups.push_back(g);
-    if (!_enabled)
+    if (!_bgConfig.enabled)
     {
         for (auto* g : groups) MoveQueueGroup(queue, bracket, g, g->NativeTeam);
         return false;
     }
     // Queue timestamps wrap after 49 days; age comparison handles that wrap.
     uint32 now = getMSTime();
-    std::stable_sort(groups.begin(), groups.end(), [now](GroupQueueInfo* a, GroupQueueInfo* b)
+    std::ranges::stable_sort(groups, [now](GroupQueueInfo* a, GroupQueueInfo* b)
     { return uint32(now - a->JoinTime) > uint32(now - b->JoinTime); });
     std::vector<CfbgBalance::Group> metrics;
     for (auto* g : groups)
@@ -129,7 +129,7 @@ bool CFBG::SelectGroups(BattlegroundQueue* queue, Battleground* bg, uint8 bracke
             if (Player* p = ObjectAccessor::FindPlayer(member.first))
             {
                 m.level += p->getLevel(); m.ilvl += p->GetAverageItemLevel();
-                if (p->getClass() == CLASS_HUNTER && p->getLevel() + _hunterDiff >= bg->GetMaxLevel()) ++m.hunters;
+                if (p->getClass() == CLASS_HUNTER && p->getLevel() + _bgConfig.hunterDiff >= bg->GetMaxLevel()) ++m.hunters;
             }
         if (m.size) { m.level /= m.size; m.ilvl /= m.size; }
         metrics.push_back(m);
@@ -163,10 +163,10 @@ bool CFBG::SelectGroups(BattlegroundQueue* queue, Battleground* bg, uint8 bracke
     }
     CfbgBalance::Options options;
     options.maximum = maximum;
-    options.relaxAtCount = _even ? _evenThreshold : 0;
-    options.allowedDifference = _even && (!_evenThreshold || std::min(teams[0].count, teams[1].count) < _evenThreshold) ? 0 : 1;
-    options.levels = _levels; options.items = _items;
-    options.hunters = _hunters && bg->GetMinLevel() >= _hunterMin && bg->GetMaxLevel() <= _hunterMax;
+    options.relaxAtCount = _bgConfig.even ? _bgConfig.evenThreshold : 0;
+    options.allowedDifference = _bgConfig.even && (!_bgConfig.evenThreshold || std::min(teams[0].count, teams[1].count) < _bgConfig.evenThreshold) ? 0 : 1;
+    options.levels = _bgConfig.levels; options.items = _bgConfig.items;
+    options.hunters = _bgConfig.hunters && bg->GetMinLevel() >= _bgConfig.hunterMin && bg->GetMaxLevel() <= _bgConfig.hunterMax;
     auto assignment = CfbgBalance::Select(metrics, teams, options);
     std::array<unsigned, 2> selected{};
     for (size_t i = 0; i < groups.size(); ++i) if (assignment[i] >= 0) selected[assignment[i]] += metrics[i].size;
@@ -175,7 +175,7 @@ bool CFBG::SelectGroups(BattlegroundQueue* queue, Battleground* bg, uint8 bracke
     for (size_t i = 0; i < groups.size(); ++i)
         if (assignment[i] >= 0)
         {
-            unsigned t = unsigned(assignment[i]);
+            auto t = unsigned(assignment[i]);
             MoveQueueGroup(queue, bracket, groups[i], TeamValue(t));
             queue->m_SelectionPools[t].AddGroup(groups[i], maximum - teams[t].count);
         }
@@ -184,23 +184,23 @@ bool CFBG::SelectGroups(BattlegroundQueue* queue, Battleground* bg, uint8 bracke
 
 bool CFBG::CanJoin(Player* player, Group* group)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
-    if (!_enabled || !group || (!group->isRaidGroup() && group->GetMembersCount() <= _groupLimit)) return true;
-    ChatHandler(player->GetSession()).PSendSysMessage("CFBG groups are limited to %u players; raid groups cannot queue.", _groupLimit);
+    std::scoped_lock guard(_mutex);
+    if (!_bgConfig.enabled || !group || (!group->isRaidGroup() && group->GetMembersCount() <= _bgConfig.groupLimit)) return true;
+    ChatHandler(player->GetSession()).PSendSysMessage("CFBG groups are limited to %u players; raid groups cannot queue.", _bgConfig.groupLimit);
     return false;
 }
 
 bool CFBG::Announce(BattlegroundQueue* queue, Battleground* bg, Player* p, uint8 bracket, uint32 min, uint32 max)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
-    if (!_enabled || bg->isArena()) return false;
+    std::scoped_lock guard(_mutex);
+    if (!_bgConfig.enabled || bg->isArena()) return false;
     uint32 count=0;
     for (unsigned i=0;i<BG_QUEUE_GROUP_TYPES_COUNT;++i)
         for (auto* group : queue->m_QueuedGroups[bracket][i])
             if (!group->IsInvitedToBGInstanceGUID) count += uint32(group->Players.size());
     std::ostringstream text;
     text << "[CFBG] " << bg->GetName() << " (" << min << '-' << max << "): " << count << " queued; " << bg->GetMinPlayersPerTeam()*2 << " needed.";
-    if (_showPlayerName) text << " Joined: " << p->GetName() << '.';
+    if (_bgConfig.showPlayerName) text << " Joined: " << p->GetName() << '.';
     ChatHandler handler(p->GetSession());
     if (sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_BATTLEGROUND_QUEUE_ANNOUNCER_PLAYERONLY)) handler.SendSysMessage(text.str().c_str());
     else handler.SendGlobalSysMessage(text.str().c_str());
@@ -209,7 +209,7 @@ bool CFBG::Announce(BattlegroundQueue* queue, Battleground* bg, Player* p, uint8
 
 bool CFBG::PartyCommitted(Player* player, Battleground* bg)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     Group* group = player->GetOriginalGroup();
     if (!group) group = player->GetGroup();
     if (!group || group->isBGGroup()) return false;
@@ -228,45 +228,64 @@ bool CFBG::PartyCommitted(Player* player, Battleground* bg)
 
 void CFBG::BeforeAdd(Battleground* bg, Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (bg->isArena()) return;
-    if (_enabled || p->GetBGTeam() != p->GetNativeTeam()) _crossFactionBGs.insert(bg->GetInstanceID());
+    if (_bgConfig.enabled || p->GetBGTeam() != p->GetNativeTeam()) _crossFactionBGs.insert(bg->GetInstanceID());
     if (_crossFactionBGs.count(bg->GetInstanceID())) PrepareAV(bg);
     uint32 team = p->GetBGTeam();
     uint32 other = team == ALLIANCE ? HORDE : ALLIANCE;
-    if (_enabled && _entry && !PartyCommitted(p, bg) && bg->GetInvitedCount(team) > bg->GetInvitedCount(other) + 1 && bg->GetInvitedCount(other) < bg->GetMaxPlayersPerTeam())
+    if (_bgConfig.enabled && _bgConfig.entry && !PartyCommitted(p, bg) && bg->GetInvitedCount(team) > bg->GetInvitedCount(other) + 1 && bg->GetInvitedCount(other) < bg->GetMaxPlayersPerTeam())
     {
         bg->DecreaseInvitedCount(team); bg->IncreaseInvitedCount(other);
         p->SetBGTeam(other); team = other;
-        float x,y,z,o; bg->GetTeamStartLoc(team,x,y,z,o); p->NearTeleportTo(x,y,z,o);
+        float x;
+        float y;
+        float z;
+        float o;
+        bg->GetTeamStartLoc(team,x,y,z,o);
+        p->NearTeleportTo(x,y,z,o);
     }
     // Honor already-issued opposite-team invites even after live disable.
-    if (_enabled || team != p->GetNativeTeam()) Apply(p, TeamIndex(team));
+    if (_bgConfig.enabled || team != p->GetNativeTeam()) Apply(p, TeamIndex(team));
 }
 void CFBG::AfterAdd(Battleground* bg, Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
-    if (_enabled && !bg->isArena() && _cooldowns) p->RemoveArenaSpellCooldowns(true);
+    std::scoped_lock guard(_mutex);
+    if (_bgConfig.enabled && !bg->isArena() && _bgConfig.cooldowns) p->RemoveArenaSpellCooldowns(true);
 }
 void CFBG::BalanceAtStart(Battleground* bg)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (_crossFactionBGs.count(bg->GetInstanceID())) PrepareAV(bg);
-    if (!_enabled || !_start || bg->isArena()) return;
+    if (!_bgConfig.enabled || !_bgConfig.start || bg->isArena()) return;
     while (true)
     {
-        uint32 a = bg->GetPlayersCountByTeam(ALLIANCE), h = bg->GetPlayersCountByTeam(HORDE);
-        if (a <= h + 1 && h <= a + 1) break;
-        uint32 large = a > h ? ALLIANCE : HORDE, smallerTeam = a > h ? HORDE : ALLIANCE;
-        Player* candidate = nullptr;
-        for (auto const& member : bg->GetPlayers())
-            if (member.second.Team == large)
-                if (Player* p = ObjectAccessor::FindPlayer(member.first))
-                    if (!PartyCommitted(p, bg)) { candidate = p; break; }
-        if (!candidate || !bg->ChangePlayerTeam(candidate, smallerTeam)) break;
+        uint32 a = bg->GetPlayersCountByTeam(ALLIANCE);
+        uint32 h = bg->GetPlayersCountByTeam(HORDE);
+        if (a <= h + 1 && h <= a + 1) return;
+        uint32 large = a > h ? ALLIANCE : HORDE;
+        uint32 smallerTeam = a > h ? HORDE : ALLIANCE;
+        Player* candidate = BalanceCandidate(bg, large);
+        if (!candidate || !bg->ChangePlayerTeam(candidate, smallerTeam)) return;
         Apply(candidate, TeamIndex(smallerTeam));
-        float x,y,z,o; bg->GetTeamStartLoc(smallerTeam,x,y,z,o); candidate->NearTeleportTo(x,y,z,o);
+        float x;
+        float y;
+        float z;
+        float o;
+        bg->GetTeamStartLoc(smallerTeam,x,y,z,o);
+        candidate->NearTeleportTo(x,y,z,o);
     }
+}
+
+Player* CFBG::BalanceCandidate(Battleground* bg, uint32 team)
+{
+    for (auto const& member : bg->GetPlayers())
+    {
+        if (member.second.Team != team) continue;
+        Player* player = ObjectAccessor::FindPlayer(member.first);
+        if (player && !PartyCommitted(player, bg)) return player;
+    }
+    return nullptr;
 }
 
 void CFBG::PrepareAV(Battleground* bg)
@@ -276,34 +295,39 @@ void CFBG::PrepareAV(Battleground* bg)
     // factions (and neutral difficulty variants). Change instance creatures,
     // never their database templates, so servers without CFBG remain intact.
     for (uint32 i=0; i<bg->BgCreatures.size(); ++i)
-        if (bg->BgCreatures[i])
-            if (Creature* creature = bg->GetBGCreature(i))
-                switch (creature->GetEntry())
-                {
-                    case 14187: case 14188: case 22528: case 22699:
-                    case 31924: case 31963: case 37240: case 37281:
-                        creature->setFaction(1216); break;
-                    case 14185: case 14186: case 22712: case 22569:
-                    case 32049: case 32053: case 37370: case 37374:
-                        creature->setFaction(1214); break;
-                    default: break;
-                }
+    {
+        if (!bg->BgCreatures[i]) continue;
+        Creature* creature = bg->GetBGCreature(i);
+        if (!creature) continue;
+        switch (creature->GetEntry())
+        {
+            case 14187: case 14188: case 22528: case 22699:
+            case 31924: case 31963: case 37240: case 37281:
+                creature->setFaction(1216); break;
+            case 14185: case 14186: case 22712: case 22569:
+            case 32049: case 32053: case 37370: case 37374:
+                creature->setFaction(1214); break;
+            default: break;
+        }
+    }
 }
 
 uint8 CFBG::ChooseVisualRace(Player* p, TeamId team)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     auto preferred = _preferences.find(p->GetGUID());
-    if (!_random && preferred != _preferences.end() && preferred->second && ValidRace(p, preferred->second, team)) return preferred->second;
+    if (!_bgConfig.random && preferred != _preferences.end() && preferred->second && ValidRace(p, preferred->second, team)) return preferred->second;
     std::vector<uint8> choices;
     for (auto const& race : VisualRaces) if (ValidRace(p, race.first, team)) choices.push_back(race.first);
     if (choices.empty()) return 0;
+    // Cosmetic race selection only: this generator never controls tokens,
+    // rewards, permissions, or team allocation and need not be cryptographic.
     static thread_local std::mt19937 random(std::random_device{}());
     return choices[std::uniform_int_distribution<size_t>(0, choices.size()-1)(random)];
 }
 void CFBG::Apply(Player* p, TeamId team, bool battlefield)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (team == p->GetNativeTeamId()) { Restore(p); return; }
     auto old = _appearances.find(p->GetGUID());
     if (old != _appearances.end() && old->second.team == team)
@@ -324,7 +348,7 @@ void CFBG::Apply(Player* p, TeamId team, bool battlefield)
     }
     else
     {
-        for (auto entry : {std::pair<uint32,int32*>(1214,&appearance.frostwolfReaction),std::pair<uint32,int32*>(1216,&appearance.stormpikeReaction)})
+        for (auto entry : {std::pair(1214u,&appearance.frostwolfReaction),std::pair(1216u,&appearance.stormpikeReaction)})
             if (FactionTemplateEntry const* faction=sFactionTemplateStore.LookupEntry(entry.first))
                 if (ReputationRank const* rank=p->GetReputationMgr().GetForcedRankIfAny(faction)) *entry.second=int32(*rank);
     }
@@ -334,7 +358,7 @@ void CFBG::Apply(Player* p, TeamId team, bool battlefield)
 }
 void CFBG::Reapply(Player* p, bool model)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     auto itr = _appearances.find(p->GetGUID());
     if (itr == _appearances.end()) return;
     auto const& appearance = itr->second;
@@ -356,12 +380,13 @@ void CFBG::Reapply(Player* p, bool model)
 }
 void CFBG::Restore(Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     auto itr = _appearances.find(p->GetGUID());
     if (itr == _appearances.end()) return;
     if (p->IsCharmed()) p->RemoveCharmAuras();
     uint32 original = itr->second.originalModel;
-    int32 frostwolf=itr->second.frostwolfReaction, stormpike=itr->second.stormpikeReaction;
+    int32 frostwolf=itr->second.frostwolfReaction;
+    int32 stormpike=itr->second.stormpikeReaction;
     _appearances.erase(itr); // Faction-update hook must not reapply during restoration.
     _updateTimers.erase(p->GetGUID());
     p->ClearTemporaryTeam();
@@ -374,20 +399,20 @@ void CFBG::Restore(Player* p)
 
 void CFBG::Removed(Battleground* bg, Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     Restore(p);
     if (!bg->GetPlayersSize()) _crossFactionBGs.erase(bg->GetInstanceID());
 }
 void CFBG::Resurrect(Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     auto itr = _appearances.find(p->GetGUID());
-    if (itr != _appearances.end()) Reapply(p, !itr->second.battlefield || _wgResurrect);
+    if (itr != _appearances.end()) Reapply(p, !itr->second.battlefield || _bfConfig.resurrect);
 }
 
 void CFBG::Login(Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!_checkedPreferences)
     {
         _preferencesAvailable = bool(CharacterDatabase.Query("SHOW TABLES LIKE 'mod_cfbg_preferences'"));
@@ -401,21 +426,20 @@ void CFBG::Login(Player* p)
     // A battlefield zone-entry callback can precede OnLogin. Apply the saved
     // preference now if the entry used its provisional random appearance.
     auto appearance = _appearances.find(p->GetGUID());
-    if (!_random && appearance != _appearances.end())
+    if (!_bgConfig.random && appearance != _appearances.end())
     {
         uint8 race = ChooseVisualRace(p, appearance->second.team);
-        if (race)
-            if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race,p->getClass()))
-            {
-                appearance->second.race = race;
-                appearance->second.model = p->getGender()==GENDER_FEMALE ? info->displayId_f : info->displayId_m;
-                Reapply(p);
-            }
+        if (PlayerInfo const* info = race ? sObjectMgr->GetPlayerInfo(race,p->getClass()) : nullptr)
+        {
+            appearance->second.race = race;
+            appearance->second.model = p->getGender()==GENDER_FEMALE ? info->displayId_f : info->displayId_m;
+            Reapply(p);
+        }
     }
 }
 void CFBG::Logout(Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     // Battlefield leave executes in RemoveFromWorld after this callback. Keep
     // the assigned team until its team-indexed records have been removed.
     auto appearance = _appearances.find(p->GetGUID());
@@ -424,13 +448,13 @@ void CFBG::Logout(Player* p)
 }
 void CFBG::Delete(uint64 guid)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     _preferences.erase(guid); _appearances.erase(guid); _warAssignments.erase(guid); _pendingAssignments.erase(guid); _updateTimers.erase(guid);
     if (_preferencesAvailable) CharacterDatabase.PExecute("DELETE FROM mod_cfbg_preferences WHERE guid=%u", GUID_LOPART(guid));
 }
 void CFBG::Update(Player* p, uint32 diff)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     auto itr = _appearances.find(p->GetGUID());
     if (itr == _appearances.end()) return;
     uint32& timer = _updateTimers[p->GetGUID()];
@@ -442,16 +466,19 @@ void CFBG::Update(Player* p, uint32 diff)
     }
 }
 
-bool CFBG::IsWG(Battlefield* bf) const {
-    std::lock_guard<std::recursive_mutex> guard(_mutex); return bf && bf->GetTypeId() == BATTLEFIELD_WG; }
+bool CFBG::IsWG(Battlefield* bf) const
+{
+    std::scoped_lock guard(_mutex);
+    return bf && bf->GetTypeId() == BATTLEFIELD_WG;
+}
 void CFBG::BFEnter(Battlefield* bf, Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!IsWG(bf) || !bf->IsWarTime() || p->InBattleground()) return;
     auto lock = _warAssignments.find(p->GetGUID());
-    if (lock != _warAssignments.end() && (_wgLock || !_enabled) && bf->TransferPlayerTeam(p, lock->second))
+    if (lock != _warAssignments.end() && (_bfConfig.lock || !_bgConfig.enabled) && bf->TransferPlayerTeam(p, lock->second))
         Apply(p, lock->second, true);
-    else if (_enabled && _wgEnabled && !_skipClasses.count(p->getClass()) && !bf->HasWarVacancy(p->GetNativeTeamId(), p->GetGUID()))
+    else if (_bgConfig.enabled && _bfConfig.enabled && !_bfConfig.skipClasses.count(p->getClass()) && !bf->HasWarVacancy(p->GetNativeTeamId(), p->GetGUID()))
     {
         TeamId opposite = p->GetNativeTeamId() == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
         if (bf->HasWarVacancy(opposite, p->GetGUID()) && bf->TransferPlayerTeam(p, opposite))
@@ -460,11 +487,11 @@ void CFBG::BFEnter(Battlefield* bf, Player* p)
 }
 void CFBG::BFChoose(Battlefield* bf, Player* p, TeamId& team)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!IsWG(bf) || p->InBattleground()) return;
     auto lock = _warAssignments.find(p->GetGUID());
-    if (lock != _warAssignments.end() && (_wgLock || !_enabled)) { team = lock->second; return; }
-    if (!_enabled || !_wgEnabled || _skipClasses.count(p->getClass())) return;
+    if (lock != _warAssignments.end() && (_bfConfig.lock || !_bgConfig.enabled)) { team = lock->second; return; }
+    if (!_bgConfig.enabled || !_bfConfig.enabled || _bfConfig.skipClasses.count(p->getClass())) return;
     if (!_censusValid)
     {
         std::set<uint64> census;
@@ -479,7 +506,7 @@ void CFBG::BFChoose(Battlefield* bf, Player* p, TeamId& team)
         _fairShare = (natives[0] + natives[1] + 1) / 2; _nativeKept = 0; _censusValid = true;
     }
     std::array<unsigned,2> live = {{unsigned(bf->GetPlayersInWar(TEAM_ALLIANCE).size()), unsigned(bf->GetPlayersInWar(TEAM_HORDE).size())}};
-    team = TeamId(CfbgBalance::WintergraspTeam(p->GetNativeTeamId(), _majority, _fairShare, _nativeKept, live, _wgPriority));
+    team = TeamId(CfbgBalance::WintergraspTeam(p->GetNativeTeamId(), _majority, _fairShare, _nativeKept, live, _bfConfig.priority));
     if (!bf->HasWarVacancy(team, p->GetGUID()))
     {
         TeamId other = team == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
@@ -489,7 +516,7 @@ void CFBG::BFChoose(Battlefield* bf, Player* p, TeamId& team)
 }
 void CFBG::BFJoined(Battlefield* bf, Player* p, bool success)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!IsWG(bf)) return;
     auto pending = _pendingAssignments.find(p->GetGUID());
     if (pending != _pendingAssignments.end())
@@ -501,7 +528,7 @@ void CFBG::BFJoined(Battlefield* bf, Player* p, bool success)
         }
         _pendingAssignments.erase(pending);
     }
-    if (success && (_enabled && _wgEnabled || _warAssignments.count(p->GetGUID()))) Apply(p, p->GetTeamId(), true);
+    if (success && (_bgConfig.enabled && _bfConfig.enabled || _warAssignments.count(p->GetGUID()))) Apply(p, p->GetTeamId(), true);
     if (success && _appearances.count(p->GetGUID())) _warAssignments[p->GetGUID()] = p->GetTeamId();
     if (!success)
     {
@@ -511,7 +538,7 @@ void CFBG::BFJoined(Battlefield* bf, Player* p, bool success)
 }
 void CFBG::BFLeft(Battlefield* bf, Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!IsWG(bf)) return;
     _pendingAssignments.erase(p->GetGUID());
     auto itr = _appearances.find(p->GetGUID());
@@ -523,7 +550,7 @@ void CFBG::BFLeft(Battlefield* bf, Player* p)
 }
 void CFBG::BFBeforeEnd(Battlefield* bf)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!IsWG(bf)) return;
     // Skyfire grants honor/achievements itself. Only complete the native
     // version of the victory quest for winners; never recast reward spells.
@@ -533,7 +560,7 @@ void CFBG::BFBeforeEnd(Battlefield* bf)
 }
 void CFBG::BFEnded(Battlefield* bf)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!IsWG(bf)) return;
     std::set<uint64> affected;
     for (auto const& entry : _appearances) if (entry.second.battlefield) affected.insert(entry.first);
@@ -546,34 +573,34 @@ void CFBG::BFEnded(Battlefield* bf)
 }
 void CFBG::BFKill(Battlefield* bf, Player* killer, Unit* victim)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!IsWG(bf) || !killer || !victim || killer == victim || victim->GetTypeId() != TypeID::TYPEID_PLAYER) return;
-    if (!_enabled && !_warAssignments.count(killer->GetGUID())) return;
+    if (!_bgConfig.enabled && !_warAssignments.count(killer->GetGUID())) return;
     killer->KilledMonsterCredit(killer->GetNativeTeamId() == TEAM_ALLIANCE ? 31086 : 39019);
 }
 void CFBG::Reputation(Player* p, uint32& faction, int32&, bool)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (!_appearances.count(p->GetGUID()) || !p->InBattleground()) return;
     if (faction == 729 && p->GetNativeTeamId() == TEAM_ALLIANCE) faction = 730;
     else if (faction == 730 && p->GetNativeTeamId() == TEAM_HORDE) faction = 729;
 }
 void CFBG::TeamChat(Player* p, ChatMsg type, Language& lang)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     if (lang == Language::LANG_ADDON) return;
     Battleground* bg = p->GetBattleground();
     Battlefield* bf = sBattlefieldMgr->GetBattlefieldToZoneId(p->GetZoneId());
-    bool bgActive = bg && !bg->isArena() && (_enabled || _crossFactionBGs.count(bg->GetInstanceID()));
-    bool bfActive = IsWG(bf) && bf->GetPlayersInWar(p->GetTeamId()).count(p->GetGUID()) && (_enabled && _wgEnabled || _warAssignments.count(p->GetGUID()));
+    bool bgActive = bg && !bg->isArena() && (_bgConfig.enabled || _crossFactionBGs.count(bg->GetInstanceID()));
+    bool bfActive = IsWG(bf) && bf->GetPlayersInWar(p->GetTeamId()).count(p->GetGUID()) && (_bgConfig.enabled && _bfConfig.enabled || _warAssignments.count(p->GetGUID()));
     if ((bgActive || bfActive) && (type == ChatMsg::CHAT_MSG_PARTY || type == ChatMsg::CHAT_MSG_RAID || type == ChatMsg::CHAT_MSG_RAID_WARNING || type == ChatMsg::CHAT_MSG_INSTANCE || type == ChatMsg::CHAT_MSG_INSTANCE_LEADER)) lang = Language::LANG_UNIVERSAL;
 }
 bool CFBG::ChooseRace(ChatHandler* handler, std::string input)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     Player* p = handler->GetSession()->GetPlayer();
-    if (_random) { handler->SendSysMessage("Race selection is disabled by CFBG.RandomRaceSelection."); return true; }
-    std::transform(input.begin(), input.end(), input.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (_bgConfig.random) { handler->SendSysMessage("Race selection is disabled by CFBG.RandomRaceSelection."); return true; }
+    std::ranges::transform(input, input.begin(), [](unsigned char c) { return char(std::tolower(c)); });
     uint8 race = 0; bool found = input == "random";
     TeamId opposite = p->GetNativeTeamId() == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
     for (auto const& candidate : VisualRaces)
@@ -586,17 +613,17 @@ bool CFBG::ChooseRace(ChatHandler* handler, std::string input)
 }
 void CFBG::Debug(ChatHandler* handler, Player* p)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     auto state = _appearances.find(p->GetGUID());
     auto pref = _preferences.find(p->GetGUID());
-    handler->PSendSysMessage("CFBG %s: enabled=%u native=%u current=%u BG=%u realRace=%u preference=%u temporary=%u model=%u nativeModel=%u", p->GetName().c_str(), _enabled, uint32(p->GetNativeTeamId()), uint32(p->GetTeamId()), p->GetBGTeam(), uint32(p->getRace()), pref == _preferences.end() ? 0u : uint32(pref->second), p->HasTemporaryTeam(), p->GetDisplayId(), p->GetNativeDisplayId());
+    handler->PSendSysMessage("CFBG %s: enabled=%u native=%u current=%u BG=%u realRace=%u preference=%u temporary=%u model=%u nativeModel=%u", p->GetName().c_str(), _bgConfig.enabled, uint32(p->GetNativeTeamId()), uint32(p->GetTeamId()), p->GetBGTeam(), uint32(p->getRace()), pref == _preferences.end() ? 0u : uint32(pref->second), p->HasTemporaryTeam(), p->GetDisplayId(), p->GetNativeDisplayId());
     if (state != _appearances.end()) handler->PSendSysMessage("Visual race=%u model=%u originalModel=%u battlefield=%u", uint32(state->second.race), state->second.model, state->second.originalModel, state->second.battlefield);
     auto lock = _warAssignments.find(p->GetGUID());
     if (lock != _warAssignments.end()) handler->PSendSysMessage("Wintergrasp war assignment=%u", uint32(lock->second));
 }
 void CFBG::BattlefieldList(ChatHandler* handler, uint32 id)
 {
-    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::scoped_lock guard(_mutex);
     Battlefield* bf = sBattlefieldMgr->GetBattlefieldByBattleId(id);
     if (!bf) { handler->SendSysMessage("Battlefield not found."); return; }
     handler->PSendSysMessage("Battlefield %u: %s, max=%u per team", id, bf->IsWarTime() ? "WAR" : "PEACE", bf->GetMaxPlayersPerTeam());

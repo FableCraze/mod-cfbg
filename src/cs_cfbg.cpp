@@ -7,6 +7,7 @@
 #include "ScriptMgr.h"
 #include "WorldSession.h"
 #include <sstream>
+#include <memory>
 class cfbg_commandscript : public CommandScript
 {
 public:
@@ -52,5 +53,6 @@ public:
         CFBG::Instance().BattlefieldList(h, id); return true;
     }
 };
-void AddSC_cfbg_commandscript() { new cfbg_commandscript(); }
-void AddSC_cfbg_bf_commandscript() { new cfbg_bf_commandscript(); }
+// Script constructors register themselves; ScriptMgr owns and deletes them.
+void AddSC_cfbg_commandscript() { std::make_unique<cfbg_commandscript>().release(); }
+void AddSC_cfbg_bf_commandscript() { std::make_unique<cfbg_bf_commandscript>().release(); }

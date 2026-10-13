@@ -12,8 +12,62 @@ std::array<unsigned,2> Counts(std::vector<CfbgBalance::Group> const& groups, std
     for (size_t i=0;i<groups.size();++i) if(result[i]>=0) counts[result[i]] += groups[i].size;
     return counts;
 }
+void CheckPremadePopulations(unsigned maximum, unsigned size)
+{
+    CfbgBalance::Options options;
+    options.maximum = maximum;
+    for (unsigned population = 0; population <= 15; ++population)
+    {
+        std::vector<CfbgBalance::Group> groups(population);
+        for (auto& group : groups) { group.size = size; group.nativeTeam = 0; }
+        auto counts = Counts(groups, CfbgBalance::Select(groups, {}, options));
+        Check(counts[0] <= maximum && counts[1] <= maximum, "Selection capacity exceeded");
+        Check(counts[0] % size == 0 && counts[1] % size == 0, "Premade was split");
+    }
+}
+void CheckMetricPriority()
+{
+    using namespace CfbgBalance;
+    Options options;
+    options.maximum = 5;
+    Group group;
+    group.size = 1;
+    group.nativeTeam = 1;
+    std::vector<Group> groups = {group};
+    std::array<Team, 2> teams = {{{1, 10, 100, 0}, {1, 20, 50, 1}}};
+    Check(Select(groups, teams, options)[0] == 0, "Level balance must precede item balance");
+    options.levels = false;
+    options.items = true;
+    Check(Select(groups, teams, options)[0] == 1, "Item balance must select the lower item total");
+    options.items = false;
+    options.hunters = true;
+    Check(Select(groups, teams, options)[0] == 0, "Hunter balance must select the lower hunter count");
+    options.hunters = false;
+    Check(Select(groups, teams, options)[0] == 1, "Equal headcounts without metrics must prefer the native team");
+    teams[0].count = 2;
+    options.items = true;
+    options.hunters = true;
+    Check(Select(groups, teams, options)[0] == 1, "Headcount must precede all metric preferences");
+}
+void CheckPackingPriority()
+{
+    using namespace CfbgBalance;
+    Options options;
+    options.maximum = 1;
+    options.allowedDifference = 0;
+    std::vector<Group> groups(3);
+    for (auto& group : groups) group.size = 1;
+    auto result = Pack(groups, {}, options);
+    Check(result[0] >= 0 && result[1] >= 0 && result[0] != result[1] && result[2] == -1,
+        "Packing must keep earlier candidates when scores tie");
+    groups[0].nativeTeam = 2;
+    result = Select(groups, {}, options);
+    Check(result == std::vector<int>({-1, 0, 1}), "Invalid native teams must remain waiting");
+}
 int main()
 {
+    CheckMetricPriority();
+    CheckPackingPriority();
     using namespace CfbgBalance;
     Options o; o.maximum=10;
     std::vector<Group> solos(5); for(auto& g:solos) {g.size=1;g.nativeTeam=0;g.level=90;g.ilvl=450;}
@@ -54,13 +108,6 @@ int main()
     // partial allocation and no team exceeding its reservation budget.
     for(unsigned max=1;max<=12;++max)
         for(unsigned size=1;size<=5;++size)
-            for(unsigned n=0;n<=15;++n)
-            {
-                std::vector<Group> groups(n); for(auto& g:groups){g.size=size;g.nativeTeam=0;}
-                o.maximum=max;
-                counts=Counts(groups,Select(groups,{},o));
-                Check(counts[0]<=max && counts[1]<=max,"Selection capacity exceeded");
-                Check(counts[0]%size==0 && counts[1]%size==0,"Premade was split");
-            }
+            CheckPremadePopulations(max, size);
     std::cout << "CFBG balance scenarios passed\n";
 }

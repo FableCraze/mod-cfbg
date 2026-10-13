@@ -57,21 +57,44 @@ public:
     bool ChooseRace(ChatHandler*, std::string);
     void Debug(ChatHandler*, Player*);
     void BattlefieldList(ChatHandler*, uint32);
-    bool Enabled() const { return _enabled; }
+    bool Enabled() const { return _bgConfig.enabled; }
 private:
+    // Player faction changes synchronously re-enter Reapply through PvPScript.
     mutable std::recursive_mutex _mutex;
     bool IsWG(Battlefield*) const;
     bool PartyCommitted(Player*, Battleground*);
+    Player* BalanceCandidate(Battleground*, uint32);
     void PrepareAV(Battleground*);
     uint8 ChooseVisualRace(Player*, TeamId);
     void MoveQueueGroup(BattlegroundQueue*, uint8, GroupQueueInfo*, uint32);
-    bool _enabled = false, _wgEnabled = false, _wgLock = true, _wgPriority = true;
-    bool _wgResurrect = true, _levels = true, _items = false, _hunters = false;
-    bool _even = false, _random = true, _entry = true, _start = true, _cooldowns = false;
-    bool _showPlayerName = false;
-    bool _preferencesAvailable = false, _checkedPreferences = false;
-    uint32 _groupLimit = 3, _evenThreshold = 0, _hunterMin = 10, _hunterMax = 19, _hunterDiff = 2;
-    std::set<uint8> _skipClasses;
+    struct BattlegroundConfig
+    {
+        bool enabled = false;
+        bool levels = true;
+        bool items = false;
+        bool hunters = false;
+        bool even = false;
+        bool random = true;
+        bool entry = true;
+        bool start = true;
+        bool cooldowns = false;
+        bool showPlayerName = false;
+        uint32 groupLimit = 3;
+        uint32 evenThreshold = 0;
+        uint32 hunterMin = 10;
+        uint32 hunterMax = 19;
+        uint32 hunterDiff = 2;
+    } _bgConfig;
+    struct BattlefieldConfig
+    {
+        bool enabled = false;
+        bool lock = true;
+        bool priority = true;
+        bool resurrect = true;
+        std::set<uint8> skipClasses;
+    } _bfConfig;
+    bool _preferencesAvailable = false;
+    bool _checkedPreferences = false;
     std::map<uint64, CFBGAppearance> _appearances;
     std::map<uint64, uint8> _preferences;
     std::map<uint64, uint32> _updateTimers;
@@ -79,6 +102,8 @@ private:
     std::map<uint64, TeamId> _pendingAssignments;
     std::set<uint32> _crossFactionBGs;
     bool _censusValid = false;
-    unsigned _majority = 0, _fairShare = 0, _nativeKept = 0;
+    unsigned _majority = 0;
+    unsigned _fairShare = 0;
+    unsigned _nativeKept = 0;
 };
 #endif

@@ -1,6 +1,7 @@
 /* Copyright since 2019 AzerothCore contributors. MIT; see ../LICENSE. */
 #include "CFBG.h"
 #include "ScriptMgr.h"
+#include <memory>
 class CFBGPvP : public PvPScript
 {
 public:
@@ -44,5 +45,8 @@ public:
 };
 void AddSC_CFBG()
 {
-    new CFBGPvP(); new CFBGPlayers(); new CFBGWorld();
+    // Script constructors register themselves; ScriptMgr owns and deletes them.
+    std::make_unique<CFBGPvP>().release();
+    std::make_unique<CFBGPlayers>().release();
+    std::make_unique<CFBGWorld>().release();
 }
