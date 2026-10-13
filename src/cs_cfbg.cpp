@@ -1,5 +1,6 @@
 /* Copyright since 2019 AzerothCore contributors. MIT; see ../LICENSE. */
 #include "CFBG.h"
+#include "CFBGScriptLifetime.h"
 #include "Chat.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -7,11 +8,15 @@
 #include "ScriptMgr.h"
 #include "WorldSession.h"
 #include <sstream>
-#include <memory>
 class cfbg_commandscript : public CommandScript
 {
 public:
     cfbg_commandscript() : CommandScript("cfbg_commandscript") { }
+    cfbg_commandscript(cfbg_commandscript const&) = delete;
+    cfbg_commandscript& operator=(cfbg_commandscript const&) = delete;
+    cfbg_commandscript(cfbg_commandscript&&) = delete;
+    cfbg_commandscript& operator=(cfbg_commandscript&&) = delete;
+    ~cfbg_commandscript() override { CFBGScriptLifetime<cfbg_commandscript>::Destroyed(this); }
     std::vector<ChatCommand> GetCommands() const override
     {
         return {{"cfbg", rbac::RBAC_PERM_COMMAND_COMMANDS, true, nullptr, "", {
@@ -33,6 +38,11 @@ class cfbg_bf_commandscript : public CommandScript
 {
 public:
     cfbg_bf_commandscript() : CommandScript("cfbg_bf_commandscript") { }
+    cfbg_bf_commandscript(cfbg_bf_commandscript const&) = delete;
+    cfbg_bf_commandscript& operator=(cfbg_bf_commandscript const&) = delete;
+    cfbg_bf_commandscript(cfbg_bf_commandscript&&) = delete;
+    cfbg_bf_commandscript& operator=(cfbg_bf_commandscript&&) = delete;
+    ~cfbg_bf_commandscript() override { CFBGScriptLifetime<cfbg_bf_commandscript>::Destroyed(this); }
     std::vector<ChatCommand> GetCommands() const override
     {
         return {};
@@ -53,6 +63,5 @@ public:
         CFBG::Instance().BattlefieldList(h, id); return true;
     }
 };
-// Script constructors register themselves; ScriptMgr owns and deletes them.
-void AddSC_cfbg_commandscript() { std::make_unique<cfbg_commandscript>().release(); }
-void AddSC_cfbg_bf_commandscript() { std::make_unique<cfbg_bf_commandscript>().release(); }
+void AddSC_cfbg_commandscript() { CFBGScriptLifetime<cfbg_commandscript>::Create(); }
+void AddSC_cfbg_bf_commandscript() { CFBGScriptLifetime<cfbg_bf_commandscript>::Create(); }

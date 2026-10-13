@@ -1,37 +1,8 @@
 /* Copyright since 2019 AzerothCore contributors. MIT; see ../LICENSE. */
 #include "CFBG.h"
+#include "CFBGScriptLifetime.h"
 #include "ScriptMgr.h"
 #include "WorldPacket.h"
-#include <memory>
-
-namespace
-{
-template<class Script>
-class CFBGScriptLifetime
-{
-public:
-    static void Create()
-    {
-        if (!Handle())
-            Handle() = std::make_unique<Script>();
-    }
-
-    static void Destroyed(Script const* script)
-    {
-        // ScriptMgr deletes registered scripts during Unload. Relinquish the
-        // matching handle from that destructor so there is no second delete.
-        if (Handle().get() == script)
-            Handle().release();
-    }
-
-private:
-    static std::unique_ptr<Script>& Handle()
-    {
-        static std::unique_ptr<Script> script;
-        return script;
-    }
-};
-}
 
 class CFBGPvP : public PvPScript
 {
