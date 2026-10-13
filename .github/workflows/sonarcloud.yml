@@ -1,0 +1,31 @@
+name: SonarCloud analysis
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      core_repository:
+        description: SkyFire core repository (owner/name)
+        type: string
+        default: FableCraze/SkyFire_548
+      core_ref:
+        description: SkyFire core branch, tag, or commit
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: SonarCloud analysis
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/core-build.yml
+    with:
+      core_repository: ${{ inputs.core_repository || 'FableCraze/SkyFire_548' }}
+      core_ref: ${{ inputs.core_ref || 'main' }}
+      analyze_sonar: true
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
