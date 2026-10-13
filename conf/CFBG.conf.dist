@@ -20,7 +20,7 @@
 #       Description: Enable cross-faction queue for Wintergrasp battlefield.
 #                    Requires CFBG.Enable = 1. Players are assigned to the team
 #                    with fewer members, applying a visual race/faction change
-#                    for the duration of their stay in the zone.
+#                    for their participation. Real race and racials are preserved.
 #       Default: 1
 #
 #   CFBG.Battlefield.TeamLock.Enable
@@ -55,7 +55,7 @@
 #                    cross-faction selection. Players of these classes always keep
 #                    their native faction and are never morphed/reassigned.
 #                    Class IDs: 1 Warrior, 2 Paladin, 3 Hunter, 4 Rogue, 5 Priest,
-#                    6 Death Knight, 7 Shaman, 8 Mage, 9 Warlock, 11 Druid.
+#                    6 Death Knight, 7 Shaman, 8 Mage, 9 Warlock, 10 Monk, 11 Druid.
 #                    Requires CFBG.Battlefield.Enable = 1.
 #       Example: "2,7" - (Paladins and Shamans stay native)
 #       Default: "" - (no class skipped)

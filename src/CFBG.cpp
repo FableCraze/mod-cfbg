@@ -1,1205 +1,604 @@
-/*
- * Copyright (С) since 2019 Andrei Guluaev (Winfidonarleyan/Kargatum) https://github.com/Winfidonarleyan
- * Copyright (С) since 2019+ AzerothCore <www.azerothcore.org>
- * Licence MIT https://opensource.org/MIT
- */
-
+/* Copyright since 2019 AzerothCore contributors. MIT; see ../LICENSE. */
 #include "CFBG.h"
+#include "CFBGBalance.h"
+#include "Battlefield.h"
+#include "BattlefieldMgr.h"
+#include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "BattlegroundQueue.h"
-#include "BattlegroundUtils.h"
 #include "Chat.h"
 #include "Config.h"
-#include "Containers.h"
+#include "Creature.h"
+#include "DatabaseEnv.h"
+#include "DBCStores.h"
 #include "Group.h"
-#include "Language.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
-#include "Opcodes.h"
-#include "ReputationMgr.h"
-#include "ScriptMgr.h"
-#include "StringConvert.h"
-#include "Tokenize.h"
-#include "GameTime.h"
+#include "ObjectMgr.h"
 #include "Player.h"
-#include "WorldSessionMgr.h"
+#include "ReputationMgr.h"
+#include "WorldSession.h"
+#include "Util.h"
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <random>
+#include <fstream>
+#include <vector>
 
-constexpr uint32 MapAlteracValley = 30;
-
-CrossFactionGroupInfo::CrossFactionGroupInfo(GroupQueueInfo* groupInfo)
+namespace
 {
-    uint32 sumLevels = 0;
-    uint32 sumAverageItemLevels = 0;
-    uint32 playersCount = 0;
-
-    for (auto const& playerGuid : groupInfo->Players)
-    {
-        auto player = ObjectAccessor::FindConnectedPlayer(playerGuid);
-        if (!player)
-            continue;
-
-        if (player->getClass() == CLASS_HUNTER && !IsHunterJoining)
-            IsHunterJoining = true;
-
-        sumLevels += player->GetLevel();
-        sumAverageItemLevels += player->GetAverageItemLevel();
-        playersCount++;
-
-        SumAverageItemLevel += player->GetAverageItemLevel();
-        SumPlayerLevel += player->GetLevel();
-    }
-
-    if (!playersCount)
-        return;
-
-    AveragePlayersLevel = sumLevels / playersCount;
-    AveragePlayersItemLevel = sumAverageItemLevels / playersCount;
+uint32 TeamValue(unsigned team) { return team == TEAM_ALLIANCE ? ALLIANCE : HORDE; }
+TeamId TeamIndex(uint32 team) { return team == ALLIANCE ? TEAM_ALLIANCE : TEAM_HORDE; }
+std::array<std::pair<uint8, char const*>, 15> const VisualRaces = {{
+    {1,"human"}, {2,"orc"}, {3,"dwarf"}, {4,"nightelf"}, {5,"undead"},
+    {6,"tauren"}, {7,"gnome"}, {8,"troll"}, {9,"goblin"}, {10,"bloodelf"},
+    {11,"draenei"}, {22,"worgen"}, {24,"pandaren"}, {25,"pandaren_alliance"}, {26,"pandaren_horde"}
+}};
+bool ValidRace(Player* p, uint8 race, TeamId team)
+{
+    ChrRacesEntry const* entry = sChrRacesStore.LookupEntry(race);
+    PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race, p->getClass());
+    if (!entry || !info || entry->TeamID != uint32(team)) return false;
+    uint32 model = p->getGender() == GENDER_FEMALE ? info->displayId_f : info->displayId_m;
+    return model && sCreatureDisplayInfoStore.LookupEntry(model);
+}
+uint32 UnsignedConfig(char const* name, uint32 value)
+{
+    return uint32(std::max(0, sConfigMgr->GetIntDefault(name, int(value))));
+}
 }
 
-CFBG::CFBG()
-{
-    _raceData =
-    {
-        RaceData{ CLASS_NONE,           { 0 }, { 0 } },
-        RaceData{ CLASS_WARRIOR,        { RACE_HUMAN, RACE_DWARF, RACE_GNOME, RACE_DRAENEI  }, { RACE_ORC, RACE_TAUREN, RACE_TROLL } },
-        RaceData{ CLASS_PALADIN,        { RACE_HUMAN, RACE_DWARF, RACE_DRAENEI }, { RACE_BLOODELF } },
-        RaceData{ CLASS_HUNTER,         { RACE_DWARF, RACE_DRAENEI }, { RACE_ORC, RACE_TAUREN, RACE_TROLL, RACE_BLOODELF } },
-        RaceData{ CLASS_ROGUE,          { RACE_HUMAN, RACE_DWARF, RACE_GNOME }, { RACE_ORC, RACE_TROLL, RACE_BLOODELF } },
-        RaceData{ CLASS_PRIEST,         { RACE_HUMAN, RACE_DWARF, RACE_DRAENEI  }, { RACE_TROLL, RACE_BLOODELF } },
-        RaceData{ CLASS_DEATH_KNIGHT,   { RACE_HUMAN, RACE_DWARF, RACE_GNOME, RACE_DRAENEI }, { RACE_ORC, RACE_TAUREN, RACE_TROLL, RACE_BLOODELF } },
-        RaceData{ CLASS_SHAMAN,         { RACE_DRAENEI }, { RACE_ORC, RACE_TAUREN, RACE_TROLL  } },
-        RaceData{ CLASS_MAGE,           { RACE_HUMAN, RACE_GNOME }, { RACE_BLOODELF, RACE_TROLL } },
-        RaceData{ CLASS_WARLOCK,        { RACE_HUMAN, RACE_GNOME }, { RACE_ORC, RACE_BLOODELF } },
-        RaceData{ CLASS_NONE,           { 0 }, { 0 } },
-        RaceData{ CLASS_DRUID,          { RACE_HUMAN }, { RACE_TAUREN } }
-    };
-
-    _raceInfo =
-    {
-        CFBGRaceInfo{ RACE_HUMAN,    "human",    TEAM_HORDE    },
-        CFBGRaceInfo{ RACE_NIGHTELF, "nightelf", TEAM_HORDE    },
-        CFBGRaceInfo{ RACE_DWARF,    "dwarf",    TEAM_HORDE    },
-        CFBGRaceInfo{ RACE_GNOME,    "gnome",    TEAM_HORDE    },
-        CFBGRaceInfo{ RACE_DRAENEI,  "draenei",  TEAM_HORDE    },
-        CFBGRaceInfo{ RACE_ORC,      "orc",      TEAM_ALLIANCE },
-        CFBGRaceInfo{ RACE_BLOODELF, "bloodelf", TEAM_ALLIANCE },
-        CFBGRaceInfo{ RACE_TROLL,    "troll",    TEAM_ALLIANCE },
-        CFBGRaceInfo{ RACE_TAUREN,   "tauren",   TEAM_ALLIANCE }
-    };
-}
-
-CFBG* CFBG::instance()
-{
-    static CFBG instance;
-    return &instance;
-}
+CFBG& CFBG::Instance() { static CFBG instance; return instance; }
 
 void CFBG::LoadConfig()
 {
-    bool const wasEnabled = _IsEnableSystem;
-    _IsEnableSystem = sConfigMgr->GetOption<bool>("CFBG.Enable", false);
-    if (!_IsEnableSystem)
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    std::string path = sConfigMgr->GetFilename();
+    size_t slash = path.find_last_of("/\\");
+    path = slash == std::string::npos ? "" : path.substr(0, slash + 1);
+    // The .dist file documents defaults. Only an explicitly installed .conf is loaded.
+    if (std::ifstream(path + "CFBG.conf").good()) sConfigMgr->LoadMore((path + "CFBG.conf").c_str());
+    _enabled = sConfigMgr->GetBoolDefault("CFBG.Enable", false);
+    _wgEnabled = sConfigMgr->GetBoolDefault("CFBG.Battlefield.Enable", true);
+    _wgLock = sConfigMgr->GetBoolDefault("CFBG.Battlefield.TeamLock.Enable", true);
+    _wgPriority = sConfigMgr->GetBoolDefault("CFBG.Battlefield.NativePriority.Enable", true);
+    _wgResurrect = sConfigMgr->GetBoolDefault("CFBG.Battlefield.ReapplyOnResurrect.Enable", true);
+    _levels = sConfigMgr->GetBoolDefault("CFBG.BalancedTeams", true);
+    _items = sConfigMgr->GetBoolDefault("CFBG.Include.Avg.Ilvl.Enable", false);
+    _hunters = sConfigMgr->GetBoolDefault("CFBG.BalancedTeams.Class.LowLevel", false);
+    _even = sConfigMgr->GetBoolDefault("CFBG.EvenTeams.Enabled", false);
+    _random = sConfigMgr->GetBoolDefault("CFBG.RandomRaceSelection", true);
+    _entry = sConfigMgr->GetBoolDefault("CFBG.BalanceTeamsOnEntry.Enabled", true);
+    _start = sConfigMgr->GetBoolDefault("CFBG.BalanceTeamsAtStart.Enabled", true);
+    _cooldowns = sConfigMgr->GetBoolDefault("CFBG.ResetCooldowns", false);
+    _showPlayerName = sConfigMgr->GetBoolDefault("CFBG.Show.PlayerName", false);
+    _groupLimit = std::max(1u, UnsignedConfig("CFBG.Players.Count.In.Group", 3));
+    _evenThreshold = UnsignedConfig("CFBG.EvenTeams.MaxPlayersThreshold", 0);
+    _hunterMin = UnsignedConfig("CFBG.BalancedTeams.Class.MinLevel", 10);
+    _hunterMax = UnsignedConfig("CFBG.BalancedTeams.Class.MaxLevel", 19);
+    _hunterDiff = UnsignedConfig("CFBG.BalancedTeams.Class.LevelDiff", 2);
+    _skipClasses.clear();
+    std::string skip = sConfigMgr->GetStringDefault("CFBG.Battlefield.SkipClasses", "");
+    std::replace(skip.begin(), skip.end(), ',', ' ');
+    std::istringstream input(skip); unsigned c;
+    while (input >> c) if (c > 0 && c < MAX_CLASSES) _skipClasses.insert(uint8(c));
+    SF_LOG_INFO("module.cfbg", "CFBG %s; existing invitations and war assignments drain normally on disable.", _enabled ? "enabled" : "disabled");
+}
+
+void CFBG::MoveQueueGroup(BattlegroundQueue* queue, uint8 bracket, GroupQueueInfo* group, uint32 team)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (group->Team == team) return;
+    for (unsigned i = 0; i < BG_QUEUE_GROUP_TYPES_COUNT; ++i)
     {
-        // Live-disable via .reload: restore every online faked player and drop
-        // all Player*-keyed state; otherwise they stay cross-faction until
-        // relog and the stale keys can corrupt a later Player reusing the
-        // same address.
-        if (wasEnabled)
-        {
-            for (auto const& [guid, player] : ObjectAccessor::GetPlayers())
-                if (IsPlayerFake(player))
-                    ClearFakePlayer(player);
-
-            // Anything left is a leaked entry whose Player was already
-            // deleted; drop it without dereferencing the key.
-            _fakePlayerStore.clear();
-            _forgetBGPlayersStore.clear();
-        }
-
+        auto& list = queue->m_QueuedGroups[bracket][i];
+        auto itr = std::find(list.begin(), list.end(), group);
+        if (itr == list.end()) continue;
+        unsigned target = (i < BG_TEAMS_COUNT ? 0 : BG_TEAMS_COUNT) + unsigned(TeamIndex(team));
+        queue->m_QueuedGroups[bracket][target].push_back(group);
+        list.erase(itr);
+        group->Team = team;
         return;
-    }
-
-    _IsEnableWGSystem = sConfigMgr->GetOption<bool>("CFBG.Battlefield.Enable", true);
-    _IsEnableWGTeamLock = sConfigMgr->GetOption<bool>("CFBG.Battlefield.TeamLock.Enable", true);
-    _IsEnableWGNativePriority = sConfigMgr->GetOption<bool>("CFBG.Battlefield.NativePriority.Enable", true);
-    _IsEnableWGReapplyOnResurrect = sConfigMgr->GetOption<bool>("CFBG.Battlefield.ReapplyOnResurrect.Enable", true);
-
-    _wgSkipClasses.clear();
-    std::string const skipClasses = sConfigMgr->GetOption<std::string>("CFBG.Battlefield.SkipClasses", "");
-    for (auto const& token : Acore::Tokenize(skipClasses, ',', false))
-    {
-        if (Optional<uint8> playerClass = Acore::StringTo<uint8>(token))
-            _wgSkipClasses.insert(*playerClass);
-    }
-
-    _IsEnableAvgIlvl = sConfigMgr->GetOption<bool>("CFBG.Include.Avg.Ilvl.Enable", false);
-    _IsEnableBalancedTeams = sConfigMgr->GetOption<bool>("CFBG.BalancedTeams", false);
-    _IsEnableEvenTeams = sConfigMgr->GetOption<bool>("CFBG.EvenTeams.Enabled", false);
-    _IsEnableBalanceClassLowLevel = sConfigMgr->GetOption<bool>("CFBG.BalancedTeams.Class.LowLevel", true);
-    _IsEnableResetCooldowns = sConfigMgr->GetOption<bool>("CFBG.ResetCooldowns", false);
-    _IsEnableBalanceTeamsOnEntry = sConfigMgr->GetOption<bool>("CFBG.BalanceTeamsOnEntry.Enabled", true);
-    _IsEnableBalanceTeamsAtStart = sConfigMgr->GetOption<bool>("CFBG.BalanceTeamsAtStart.Enabled", true);
-    _showPlayerName = sConfigMgr->GetOption<bool>("CFBG.Show.PlayerName", false);
-    _EvenTeamsMaxPlayersThreshold = sConfigMgr->GetOption<uint32>("CFBG.EvenTeams.MaxPlayersThreshold", 0);
-    _MaxPlayersCountInGroup = sConfigMgr->GetOption<uint32>("CFBG.Players.Count.In.Group", 3);
-    _balanceClassMinLevel = sConfigMgr->GetOption<uint8>("CFBG.BalancedTeams.Class.MinLevel", 10);
-    _balanceClassMaxLevel = sConfigMgr->GetOption<uint8>("CFBG.BalancedTeams.Class.MaxLevel", 19);
-    _balanceClassLevelDiff = sConfigMgr->GetOption<uint8>("CFBG.BalancedTeams.Class.LevelDiff", 2);
-    _randomizeRaces = sConfigMgr->GetOption<bool>("CFBG.RandomRaceSelection", true);
-}
-
-uint32 CFBG::GetBGTeamAverageItemLevel(Battleground* bg, TeamId team)
-{
-    if (!bg)
-    {
-        return 0;
-    }
-
-    uint32 sum = 0;
-    uint32 count = 0;
-
-    for (auto const& [playerGuid, player] : bg->GetPlayers())
-    {
-        if (player && player->GetTeamId() == team)
-        {
-            sum += player->GetAverageItemLevel();
-            count++;
-        }
-    }
-
-    if (!count || !sum)
-    {
-        return 0;
-    }
-
-    return sum / count;
-}
-
-uint32 CFBG::GetBGTeamSumPlayerLevel(Battleground* bg, TeamId team)
-{
-    if (!bg)
-    {
-        return 0;
-    }
-
-    uint32 sum = 0;
-
-    for (auto const& [playerGuid, player] : bg->GetPlayers())
-    {
-        if (player && player->GetTeamId() == team)
-        {
-            sum += player->GetLevel();
-        }
-    }
-
-    return sum;
-}
-
-std::optional<TeamId> CFBG::ResolveHunterOverride(Battleground* bg, CrossFactionGroupInfo const& cfGroupInfo)
-{
-    if (!IsEnableEvenTeams())
-        return std::nullopt;
-
-    uint32 playerLevel = cfGroupInfo.AveragePlayersLevel;
-
-    // if CFBG.BalancedTeams.Class.LowLevel is enabled, balance the quantity of
-    // hunters per team when a hunter is joining within the configured level band.
-    if (IsEnableBalanceClassLowLevel() &&
-        (playerLevel >= _balanceClassMinLevel && playerLevel <= _balanceClassMaxLevel) &&
-        (playerLevel >= getBalanceClassMinLevel(bg)) &&
-        cfGroupInfo.IsHunterJoining)
-    {
-        return getTeamWithLowerClass(bg, CLASS_HUNTER);
-    }
-
-    return std::nullopt;
-}
-
-TeamId CFBG::ResolveBalancedTeam(TeamBalanceContext const& ctx)
-{
-    // 1. Head-count: the smaller side always wins.
-    if (ctx.countA != ctx.countH)
-        return ctx.countA < ctx.countH ? TEAM_ALLIANCE : TEAM_HORDE;
-
-    // 2. Level sum (only if CFBG.BalancedTeams).
-    if (IsEnableBalancedTeams())
-    {
-        TeamId team = ctx.fallback;
-
-        // First select team - where the sum of the levels is less
-        if (ctx.levelSumA != ctx.levelSumH)
-            team = ctx.levelSumA < ctx.levelSumH ? TEAM_ALLIANCE : TEAM_HORDE;
-
-        // EvenTeams refinement (only if CFBG.EvenTeams.Enabled).
-        if (IsEnableEvenTeams())
-        {
-            if (ctx.hunterOverride)
-            {
-                team = *ctx.hunterOverride;
-            }
-            // Zero-denominator guard: formation / low-occupancy can present an
-            // empty side; float division by 0 would yield inf/NaN and garbage.
-            else if (ctx.evenCountA > 0 && ctx.evenCountH > 0)
-            {
-                // We need to have a diff of 0.5f
-                // Range of calculation: [minBgLevel, maxBgLevel], i.e: [10,20)
-                float avgLvlAlliance = ctx.levelSumA / (float)ctx.evenCountA;
-                float avgLvlHorde = ctx.levelSumH / (float)ctx.evenCountH;
-
-                if (std::abs(avgLvlAlliance - avgLvlHorde) >= 0.5f)
-                    team = avgLvlAlliance < avgLvlHorde ? TEAM_ALLIANCE : TEAM_HORDE;
-                else if (ctx.avgIlvlA != ctx.avgIlvlH) // levels balanced, ilvl breaks the tie; an exact ilvl tie keeps the current pick
-                    team = ctx.avgIlvlA < ctx.avgIlvlH ? TEAM_ALLIANCE : TEAM_HORDE;
-            }
-        }
-        else if (ctx.levelSumA == ctx.levelSumH && ctx.avgIlvlA != ctx.avgIlvlH)
-        {
-            team = ctx.avgIlvlA < ctx.avgIlvlH ? TEAM_ALLIANCE : TEAM_HORDE;
-        }
-
-        return team;
-    }
-
-    // 3. Item level (only if CFBG.Include.Avg.Ilvl.Enable).
-    if (IsEnableAvgIlvl() && ctx.avgIlvlA != ctx.avgIlvlH)
-        return ctx.avgIlvlA < ctx.avgIlvlH ? TEAM_ALLIANCE : TEAM_HORDE;
-
-    // 4. Fallback: the provisional / candidate team.
-    return ctx.fallback;
-}
-
-uint8 CFBG::getBalanceClassMinLevel(const Battleground* bg) const
-{
-    return static_cast<uint8>(bg->GetMaxLevel()) - _balanceClassLevelDiff;
-}
-
-TeamId CFBG::getTeamWithLowerClass(Battleground *bg, Classes c)
-{
-    uint16 hordeClassQty = 0;
-    uint16 allianceClassQty = 0;
-
-    for (auto const& [playerGuid, player] : bg->GetPlayers())
-    {
-        if (player && player->getClass() == c)
-        {
-            if (player->GetTeamId() == TEAM_ALLIANCE)
-            {
-                allianceClassQty++;
-            }
-            else
-            {
-                hordeClassQty++;
-            }
-        }
-    }
-
-    return hordeClassQty > allianceClassQty ? TEAM_ALLIANCE : TEAM_HORDE;
-}
-
-void CFBG::ValidatePlayerForBG(Battleground* bg, Player* player)
-{
-    if (!_IsEnableSystem || !bg || bg->isArena() || !player)
-        return;
-
-    // A WG fake survives the teleport into a BG: OnPlayerUpdateZone's
-    // InBattleground() guard blocks the deferred clear. Drop it so
-    // BalanceTeamsOnEntry and SetFakeRaceAndMorph run against BG state.
-    if (IsPlayerFake(player))
-        ClearFakePlayer(player);
-
-    BalanceTeamsOnEntry(bg, player);
-
-    TeamId const assigned = player->GetBgTeamId();
-
-    // Keep bgTeamId authoritative (also covers the TEAM_NEUTRAL bootstrap where GetBgTeamId() falls back to m_team)
-    player->GetBGData().bgTeamId = assigned;
-
-    EnforceBGTeamConsistency(player);
-
-    // AV forced reactions apply only to a cross-faction (faked) player;
-    // a native player already holds the correct Frostwolf/Stormpike standings.
-    if (!IsPlayingNative(player) && bg->GetMapId() == MapAlteracValley)
-    {
-        if (assigned == TEAM_HORDE)
-        {
-            player->GetReputationMgr().ApplyForceReaction(FACTION_FROSTWOLF_CLAN, REP_FRIENDLY, true);
-            player->GetReputationMgr().ApplyForceReaction(FACTION_STORMPIKE_GUARD, REP_HOSTILE, true);
-        }
-        else
-        {
-            player->GetReputationMgr().ApplyForceReaction(FACTION_FROSTWOLF_CLAN, REP_HOSTILE, true);
-            player->GetReputationMgr().ApplyForceReaction(FACTION_STORMPIKE_GUARD, REP_FRIENDLY, true);
-        }
-
-        player->GetReputationMgr().SendForceReactions();
     }
 }
 
-void CFBG::EnforceBGTeamConsistency(Player* player)
+bool CFBG::SelectGroups(BattlegroundQueue* queue, Battleground* bg, uint8 bracket, uint32 minimum, uint32 maximum, bool fill)
 {
-    if (!player || !player->InBattleground())
-        return;
-
-    Battleground* bg = player->GetBattleground();
-    if (!bg || bg->isArena())
-        return;
-
-    TeamId const assigned = player->GetBgTeamId();
-
-    // Native: must not carry a fake.
-    if (player->GetTeamId(true) == assigned)
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (bg->isArena()) return false;
+    std::vector<GroupQueueInfo*> groups;
+    for (unsigned i = 0; i < BG_QUEUE_GROUP_TYPES_COUNT; ++i)
+        for (GroupQueueInfo* g : queue->m_QueuedGroups[bracket][i])
+            if (!g->ArenaType && !g->IsRated && !g->IsInvitedToBGInstanceGUID) groups.push_back(g);
+    if (!_enabled)
     {
-        if (IsPlayerFake(player))
-            ClearFakePlayer(player);
-
-        // A foreign template can outlive its writer on a non-faked native
-        // (e.g. a charm undone after an unfake). Repair it unless a legitimate
-        // writer owns it: GM-on holds FACTION_FRIENDLY; an active MOD_FACTION
-        // aura restores natives correctly on removal.
-        if (!player->IsGameMaster() && !player->HasAuraType(SPELL_AURA_MOD_FACTION))
-        {
-            ChrRacesEntry const* raceEntry = sChrRacesStore.LookupEntry(player->getRace(true));
-            if (raceEntry && player->GetFaction() != raceEntry->FactionID)
-                SetFactionForRace(player, player->getRace(true), player->GetTeamId(true));
-        }
-
-        return;
-    }
-
-    // Cross-faction: must be faked to `assigned`.
-    FakePlayer const* info = GetFakePlayer(player);
-    if (!info)
-        SetFakeRaceAndMorph(player);            // not faked yet -> apply
-    else if (info->FakeTeamID != assigned)
-    {
-        ClearFakePlayer(player);                // stale wrong-team fake -> redo
-        SetFakeRaceAndMorph(player);
-    }
-    else
-        ReapplyFakePlayer(player);              // correct side -> re-push reset values
-}
-
-void CFBG::BalanceTeamsOnEntry(Battleground* bg, Player* player)
-{
-    // The invite-time team was chosen using level/ilvl, but declined invites can
-    // leave the teams uneven once players actually arrive. Here we only correct
-    // that head-count distortion for solo entrants.
-    if (!IsEnableSystem() || !IsEnableBalanceTeamsOnEntry())
-        return;
-
-    if (bg->isArena() || bg->isRated())
-        return;
-
-    // Never split a genuine BG premade materialising here, but a solo-queued
-    // player who merely sits in a social/questing party (e.g. a duo auto-queued
-    // as two separate solo entries) is still eligible. At this hook -- before BG
-    // raid placement -- GetGroup() is the social party.
-    if (IsPartyCommittedToBG(player, player->GetGroup(), bg))
-        return;
-
-    // Genuine first entry only: skip relog re-adds (already in the BG), otherwise
-    // the invited-count books would be adjusted a second time.
-    if (bg->GetPlayers().find(player->GetGUID()) != bg->GetPlayers().end())
-        return;
-
-    // Never flip a player who is already faked. The faction sync that backs
-    // GetTeamId() -- SetFakeRaceAndMorph -> SetFactionForRace -> setTeamId() -- is
-    // skipped for already-faked players (its IsPlayerFake guard). Flipping bgTeamId
-    // now would therefore move the player to the new side for grouping/graveyards/
-    // win purposes while GetTeamId() (used by flag capture and scoring) stays on the
-    // OLD side -- e.g. an Alliance player on Horde's side capturing Alliance flags.
-    // Fresh entrants are not faked yet (the morph runs right after this), so they
-    // are still rebalanced normally.
-    if (IsPlayerFake(player))
-        return;
-
-    TeamId provisional = player->GetBgTeamId();
-
-    // The invited ledger (entered + accepted-in-flight + pending-invited) sees
-    // reservations that live head counts miss while invitees are still porting
-    // (issue #172: a solo flipped onto a porting premade's side -> 1v3).
-    int32 countA = bg->GetInvitedCount(TEAM_ALLIANCE);
-    int32 countH = bg->GetInvitedCount(TEAM_HORDE);
-
-    // Accept does not release the reservation (RemovePlayer with
-    // decreaseInvitedCount=false), so the entrant is still ledgered on the
-    // provisional side: exclude them from the comparison.
-    if (provisional == TEAM_ALLIANCE)
-        --countA;
-    else
-        --countH;
-
-    // Sides already balanced: keep the provisional team, no morph / count churn.
-    if (countA == countH)
-        return;
-
-    TeamId corrected = (countA < countH) ? TEAM_ALLIANCE : TEAM_HORDE;
-
-    if (corrected == provisional)
-        return;
-
-    // Move the reserved slot to the corrected side. DecreaseInvitedCount is safe:
-    // accept does not decrement, so the player is still counted as invited on the
-    // provisional team; the method is underflow-guarded. The matching decrement
-    // happens in RemovePlayerAtLeave on the (corrected) current team -> zero-sum.
-    bg->DecreaseInvitedCount(provisional);
-    bg->IncreaseInvitedCount(corrected);
-    player->GetBGData().bgTeamId = corrected;
-
-    // The player was already teleported to the provisional base before AddPlayer;
-    // move them to the corrected base so they don't spawn at the enemy's.
-    Position const* startPos = bg->GetTeamStartPosition(corrected);
-    player->TeleportTo(bg->GetMapId(), startPos->GetPositionX(), startPos->GetPositionY(),
-        startPos->GetPositionZ(), startPos->GetOrientation());
-}
-
-bool CFBG::IsPartyCommittedToBG(Player* player, Group* group, Battleground* bg)
-{
-    if (!group)
+        for (auto* g : groups) MoveQueueGroup(queue, bracket, g, g->NativeTeam);
         return false;
-
-    for (auto const& slot : group->GetMemberSlots())
-    {
-        if (slot.guid == player->GetGUID())
-            continue;
-
-        // Already standing in this instance.
-        if (bg->GetPlayers().find(slot.guid) != bg->GetPlayers().end())
-            return true;
-
-        // Or still porting in on an invite to it. An offline member can't be on
-        // his way, so he never blocks the flip.
-        Player* member = ObjectAccessor::FindConnectedPlayer(slot.guid);
-        if (member && member->IsInvitedForBattlegroundInstance(bg->GetInstanceID()))
-            return true;
     }
-
-    return false;
-}
-
-void CFBG::BalanceTeamsAtStart(Battleground* bg)
-{
-    // The gates just opened. Team selection was balanced when the invites went
-    // out, but same-side no-shows with an empty backfill queue can leave the
-    // physical teams grossly uneven (4v1). Nothing re-checks the split before the
-    // doors open, so do it here: flip surplus entrants onto the smaller side
-    // until the diff is at most 1.
-    if (!IsEnableSystem() || !IsEnableBalanceTeamsAtStart())
-        return;
-
-    if (!bg || bg->isArena() || bg->isRated())
-        return;
-
-    // Decide on physical head counts only: the pending reservations that never
-    // materialised are exactly what produced the imbalance, so the invited ledger
-    // must not steer the repair. Each flip shrinks the diff by 2, so the loop
-    // terminates when the teams are within 1 or no flippable candidate is left.
-    while (true)
+    // Queue timestamps wrap after 49 days; age comparison handles that wrap.
+    uint32 now = getMSTime();
+    std::stable_sort(groups.begin(), groups.end(), [now](GroupQueueInfo* a, GroupQueueInfo* b)
+    { return uint32(now - a->JoinTime) > uint32(now - b->JoinTime); });
+    std::vector<CfbgBalance::Group> metrics;
+    for (auto* g : groups)
     {
-        uint32 const countA = bg->GetPlayersCountByTeam(TEAM_ALLIANCE);
-        uint32 const countH = bg->GetPlayersCountByTeam(TEAM_HORDE);
-        uint32 const diff = countA > countH ? countA - countH : countH - countA;
-
-        if (diff < 2)
-            break;
-
-        TeamId const larger = countA > countH ? TEAM_ALLIANCE : TEAM_HORDE;
-        TeamId const smaller = larger == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
-
-        // Prefer flipping a faked player whose real faction is the smaller side:
-        // the flip just unfakes him back to native (least disruption). Otherwise
-        // take any flippable player on the larger side.
-        Player* toFlip = nullptr;
-        Player* fallback = nullptr;
-
-        for (auto const& [guid, player] : bg->GetPlayers())
-        {
-            if (!player || player->GetBgTeamId() != larger)
-                continue;
-
-            // Never split a real premade. Inside the BG the social party is the
-            // original group -- GetGroup() is the BG raid at this point.
-            if (IsPartyCommittedToBG(player, player->GetOriginalGroup(), bg))
-                continue;
-
-            if (IsPlayerFake(player) && player->GetTeamId(true) == smaller)
+        CfbgBalance::Group m;
+        m.size = unsigned(g->Players.size()); m.nativeTeam = TeamIndex(g->NativeTeam);
+        for (auto const& member : g->Players)
+            if (Player* p = ObjectAccessor::FindPlayer(member.first))
             {
-                toFlip = player;
-                break;
+                m.level += p->getLevel(); m.ilvl += p->GetAverageItemLevel();
+                if (p->getClass() == CLASS_HUNTER && p->getLevel() + _hunterDiff >= bg->GetMaxLevel()) ++m.hunters;
             }
-
-            if (!fallback)
-                fallback = player;
-        }
-
-        if (!toFlip)
-            toFlip = fallback;
-
-        // Nothing left to flip: any residual imbalance is rooted in premades we
-        // won't split. Open the match as-is -- the existing 5-minute premature
-        // finish path handles a still-degenerate game, exactly as today.
-        if (!toFlip)
-            break;
-
-        // Keep both the physical counts and the invited ledger zero-sum with the
-        // player's future leave-time decrement (mirrors BalanceTeamsOnEntry).
-        bg->UpdatePlayersCountByTeam(larger, true);
-        bg->UpdatePlayersCountByTeam(smaller, false);
-        bg->DecreaseInvitedCount(larger);
-        bg->IncreaseInvitedCount(smaller);
-        toFlip->GetBGData().bgTeamId = smaller;
-
-        // Move him into the smaller side's BG raid. Remove from the old raid
-        // first: AddOrSetPlayerToCorrectBgGroup early-returns while the player is
-        // still in a BG group.
-        if (Group* oldRaid = bg->GetBgRaid(larger))
-            if (oldRaid->IsMember(toFlip->GetGUID()))
-                if (!oldRaid->RemoveMember(toFlip->GetGUID())) // group was disbanded
-                    bg->SetBgRaid(larger, nullptr);
-        bg->AddOrSetPlayerToCorrectBgGroup(toFlip, smaller);
-
-        // Apply/clear/redo the fake for the new side.
-        EnforceBGTeamConsistency(toFlip);
-
-        // The flip changed his race/faction; refresh every client's cached
-        // identity for him (and his for theirs) so nobody keeps the pre-flip
-        // race in their name-query cache -- same path a fresh entrant takes via
-        // OnBattlegroundAddPlayer.
-        FitPlayerInTeam(toFlip, bg);
-
-        // AV forced reactions track the assigned side, so refresh them for a
-        // player who is now cross-faction (a now-native player had them cleared
-        // by the unfake). Mirrors ValidatePlayerForBG's entry-time handling.
-        if (!IsPlayingNative(toFlip) && bg->GetMapId() == MapAlteracValley)
-        {
-            if (smaller == TEAM_HORDE)
+        if (m.size) { m.level /= m.size; m.ilvl /= m.size; }
+        metrics.push_back(m);
+    }
+    std::array<CfbgBalance::Team, 2> teams{};
+    if (fill)
+    {
+        for (unsigned t = 0; t < 2; ++t) teams[t].count = bg->GetInvitedCount(TeamValue(t));
+        // Include reservations not yet inside in the numerical balancing data.
+        std::set<uint64> counted;
+        for (auto const& member : bg->GetPlayers())
+            if (Player* p = ObjectAccessor::FindPlayer(member.first))
             {
-                toFlip->GetReputationMgr().ApplyForceReaction(FACTION_FROSTWOLF_CLAN, REP_FRIENDLY, true);
-                toFlip->GetReputationMgr().ApplyForceReaction(FACTION_STORMPIKE_GUARD, REP_HOSTILE, true);
+                unsigned t = TeamIndex(member.second.Team);
+                teams[t].levels += p->getLevel(); teams[t].items += p->GetAverageItemLevel();
+                if (p->getClass() == CLASS_HUNTER) ++teams[t].hunters;
+                counted.insert(member.first);
             }
-            else
-            {
-                toFlip->GetReputationMgr().ApplyForceReaction(FACTION_FROSTWOLF_CLAN, REP_HOSTILE, true);
-                toFlip->GetReputationMgr().ApplyForceReaction(FACTION_STORMPIKE_GUARD, REP_FRIENDLY, true);
-            }
-
-            toFlip->GetReputationMgr().SendForceReactions();
-        }
-
-        // Move him from his old base to the smaller side's.
-        Position const* startPos = bg->GetTeamStartPosition(smaller);
-        toFlip->TeleportTo(bg->GetMapId(), startPos->GetPositionX(), startPos->GetPositionY(),
-            startPos->GetPositionZ(), startPos->GetOrientation());
-
-        LOG_DEBUG("module", "mod-cfbg: BalanceTeamsAtStart flipped {} to {} in instance {} ({}v{})",
-            toFlip->GetName(), static_cast<uint32>(smaller), bg->GetInstanceID(),
-            bg->GetPlayersCountByTeam(TEAM_ALLIANCE), bg->GetPlayersCountByTeam(TEAM_HORDE));
+        for (unsigned i = 0; i < BG_QUEUE_GROUP_TYPES_COUNT; ++i)
+            for (auto* g : queue->m_QueuedGroups[bracket][i])
+                if (g->IsInvitedToBGInstanceGUID == bg->GetInstanceID())
+                    for (auto const& member : g->Players)
+                        if (!counted.count(member.first))
+                            if (Player* p = ObjectAccessor::FindPlayer(member.first))
+                            {
+                                unsigned t = TeamIndex(g->Team);
+                                teams[t].levels += p->getLevel(); teams[t].items += p->GetAverageItemLevel();
+                                if (p->getClass() == CLASS_HUNTER) ++teams[t].hunters;
+                                counted.insert(member.first);
+                            }
     }
-}
-
-uint32 CFBG::GetMorphFromRace(uint8 race, uint8 gender)
-{
-    switch (race)
-    {
-        case RACE_BLOODELF:
-            return gender == GENDER_MALE ? FAKE_M_BLOOD_ELF : FAKE_F_BLOOD_ELF;
-        case RACE_ORC:
-            return gender == GENDER_MALE ? FAKE_M_FEL_ORC : FAKE_F_ORC;
-        case RACE_TROLL:
-            return gender == GENDER_MALE ? FAKE_M_TROLL : FAKE_F_BLOOD_ELF;
-        case RACE_TAUREN:
-            return gender == GENDER_MALE ? FAKE_M_TAUREN : FAKE_F_TAUREN;
-        case RACE_DRAENEI:
-            return gender == GENDER_MALE ? FAKE_M_BROKEN_DRAENEI : FAKE_F_DRAENEI;
-        case RACE_DWARF:
-            return gender == GENDER_MALE ? FAKE_M_DWARF : FAKE_F_HUMAN;
-        case RACE_GNOME:
-            return gender == GENDER_MALE ? FAKE_M_GNOME : FAKE_F_GNOME;
-        case RACE_NIGHTELF: // female is missing and male causes client crashes...
-        case RACE_HUMAN:
-            return gender == GENDER_MALE ? FAKE_M_HUMAN : FAKE_F_HUMAN;
-        default:
-            // Default: Blood elf.
-            return gender == GENDER_MALE ? FAKE_M_BLOOD_ELF : FAKE_F_BLOOD_ELF;
-    }
-}
-
-CFBG::RandomSkinInfo CFBG::GetRandomRaceMorph(TeamId team, uint8 playerClass, uint8 gender)
-{
-    uint8 playerRace = Acore::Containers::SelectRandomContainerElement(team == TEAM_ALLIANCE ? _raceData[playerClass].availableRacesH : _raceData[playerClass].availableRacesA);
-    uint32 playerMorph = GetMorphFromRace(playerRace, gender);
-
-    return { playerRace, playerMorph };
-}
-
-void CFBG::SetFakeRaceAndMorph(Player* player)
-{
-    if (!player->InBattleground() || player->GetTeamId(true) == player->GetBgTeamId() || IsPlayerFake(player))
-        return;
-
-    // generate random race and morph
-    RandomSkinInfo skinInfo{ GetRandomRaceMorph(player->GetTeamId(true), player->getClass(), player->getGender()) };
-
-    uint8 selectedRace = player->GetPlayerSetting("mod-cfbg", SETTING_CFBG_RACE).value;
-
-    if (!RandomizeRaces() && selectedRace && IsRaceValidForFaction(player->GetTeamId(true), selectedRace))
-    {
-        skinInfo.first = selectedRace;
-        skinInfo.second = GetMorphFromRace(skinInfo.first, player->getGender());
-    }
-
-    FakePlayer fakePlayerInfo
-    {
-        skinInfo.first,
-        skinInfo.second,
-        player->TeamIdForRace(skinInfo.first),
-        player->getRace(true),
-        player->GetDisplayId(),
-        player->GetNativeDisplayId(),
-        player->GetTeamId(true)
-    };
-
-    player->setRace(fakePlayerInfo.FakeRace);
-    SetFactionForRace(player, fakePlayerInfo.FakeRace, fakePlayerInfo.FakeTeamID);
-    player->SetDisplayId(fakePlayerInfo.FakeMorph);
-    player->SetNativeDisplayId(fakePlayerInfo.FakeMorph);
-
-    _fakePlayerStore.emplace(player, std::move(fakePlayerInfo));
-}
-
-void CFBG::SetFakeRaceAndMorphForBF(Player* player, TeamId assignedTeam)
-{
-    if (!player || IsPlayerFake(player))
-        return;
-
-    TeamId realTeam = player->GetTeamId(true);
-    if (realTeam == assignedTeam)
-        return;
-
-    // Generate a race/morph from the assigned team's faction (opposite of real faction)
-    RandomSkinInfo skinInfo{ GetRandomRaceMorph(realTeam, player->getClass(), player->getGender()) };
-
-    uint8 selectedRace = player->GetPlayerSetting("mod-cfbg", SETTING_CFBG_RACE).value;
-
-    if (!RandomizeRaces() && selectedRace && IsRaceValidForFaction(realTeam, selectedRace))
-    {
-        skinInfo.first = selectedRace;
-        skinInfo.second = GetMorphFromRace(skinInfo.first, player->getGender());
-    }
-
-    FakePlayer fakePlayerInfo
-    {
-        skinInfo.first,
-        skinInfo.second,
-        assignedTeam,
-        player->getRace(true),
-        player->GetDisplayId(),
-        player->GetNativeDisplayId(),
-        realTeam
-    };
-
-    player->setRace(fakePlayerInfo.FakeRace);
-    SetFactionForRace(player, fakePlayerInfo.FakeRace, assignedTeam);
-    player->SetDisplayId(fakePlayerInfo.FakeMorph);
-    player->SetNativeDisplayId(fakePlayerInfo.FakeMorph);
-
-    _fakePlayerStore.emplace(player, std::move(fakePlayerInfo));
-}
-
-void CFBG::SetFactionForRace(Player* player, uint8 Race, TeamId teamId)
-{
-    if (!player)
-        return;
-
-    player->setTeamId(teamId);
-
-    ChrRacesEntry const* DBCRace = sChrRacesStore.LookupEntry(Race);
-    player->SetFaction(DBCRace ? DBCRace->FactionID : 0);
-
-    for (Unit* controlled : player->m_Controlled)
-    {
-        if (controlled)
-            controlled->SetFaction(player->GetFaction());
-    }
-}
-
-void CFBG::ClearFakePlayer(Player* player)
-{
-    if (!IsPlayerFake(player))
-        return;
-
-    // Unwind any charm ON the player while the fake record still exists:
-    // Unit::RemoveCharmedBy blindly restores the faction snapshotted at charm
-    // time (the fake one), which the restore below then overwrites. A charm
-    // ending after the unfake would re-plant the fake template (#166).
-    if (player->IsCharmed())
-        player->RemoveCharmAuras();
-
-    player->setRace(_fakePlayerStore[player].RealRace);
-    // Restore via the aura-resolution path, not the entry-time snapshot: a
-    // player who dropped a shapeshift/transform mid-BG must get the real model
-    // back, one still in the form keeps the form model. RestoreDisplayId's
-    // no-aura fallback is the native display, so set that first.
-    player->SetNativeDisplayId(_fakePlayerStore[player].RealNativeMorph);
-    player->RestoreDisplayId();
-    SetFactionForRace(player, _fakePlayerStore[player].RealRace, _fakePlayerStore[player].RealTeamID);
-
-    // Clear forced faction reactions. Rank doesn't matter here, not used when they are removed.
-    player->GetReputationMgr().ApplyForceReaction(FACTION_FROSTWOLF_CLAN, REP_FRIENDLY, false);
-    player->GetReputationMgr().ApplyForceReaction(FACTION_STORMPIKE_GUARD, REP_FRIENDLY, false);
-
-    _fakePlayerStore.erase(player);
-}
-
-// Erase-only: no race/morph/faction/m_team restore. Used at wartime WG logout,
-// where Player::RemoveFromWorld still erases PlayersInWar keyed on the fake team.
-void CFBG::DropFakePlayerRecord(Player* player)
-{
-    _fakePlayerStore.erase(player);
-}
-
-void CFBG::ReapplyFakePlayer(Player* player)
-{
-    FakePlayer const* info = GetFakePlayer(player);
-    if (!info)
-        return;
-
-    // Re-push the stored fake values after a resurrect so the assigned faction
-    // and morph survive the ghost->alive transition.
-    player->setRace(info->FakeRace);
-    SetFactionForRace(player, info->FakeRace, info->FakeTeamID);
-    player->SetDisplayId(info->FakeMorph);
-    player->SetNativeDisplayId(info->FakeMorph);
-}
-
-bool CFBG::IsPlayerFake(Player* player)
-{
-    return _fakePlayerStore.contains(player);
-}
-
-FakePlayer const* CFBG::GetFakePlayer(Player* player) const
-{
-    return Acore::Containers::MapGetValuePtr(_fakePlayerStore, player);
-}
-
-std::optional<TeamId> CFBG::GetWGWarAssignment(ObjectGuid guid) const
-{
-    auto const& itr = _wgWarAssignmentStore.find(guid);
-    if (itr == _wgWarAssignmentStore.end())
-        return std::nullopt;
-
-    return itr->second;
-}
-
-void CFBG::SetWGWarAssignment(ObjectGuid guid, TeamId team)
-{
-    _wgWarAssignmentStore[guid] = team;
-}
-
-void CFBG::ClearWGWarAssignments()
-{
-    // A player re-faked at zone entry whose invite was still pending at war
-    // end is in no PlayersInWar set, so the war-end unfake loop misses him;
-    // sweep the assignments so no fake survives the war. Players inside a
-    // battleground are skipped: their fake belongs to the BG lifecycle.
-    for (auto const& [guid, teamId] : _wgWarAssignmentStore)
-        if (Player* player = ObjectAccessor::FindPlayer(guid))
-            if (!player->InBattleground() && IsPlayerFake(player))
-                ClearFakePlayer(player);
-
-    _wgWarAssignmentStore.clear();
-    _wgCensusValid = false;
-    _wgMajorityNativeKept = 0;
-}
-
-TeamId CFBG::ResolveWGWarTeam(Player* player, uint32 nativeAllianceInvited, uint32 nativeHordeInvited, uint32 allianceInWar, uint32 hordeInWar)
-{
-    // Capture the native split once: at the first join PlayersInWar is empty
-    // and nobody is faked, so the invited counts are the true native census.
-    if (!_wgCensusValid)
-    {
-        _wgMajorityTeam = (nativeAllianceInvited >= nativeHordeInvited) ? TEAM_ALLIANCE : TEAM_HORDE;
-        _wgMajorityFairShare = (nativeAllianceInvited + nativeHordeInvited + 1) / 2;
-        _wgMajorityNativeKept = 0;
-        _wgCensusValid = true;
-    }
-
-    TeamId realTeam = player->GetTeamId(true);
-
-    // Minority stays native.
-    if (realTeam != _wgMajorityTeam)
-        return realTeam;
-
-    // Majority keeps its fair share native in accept order; the rest (latest
-    // to commit) flip.
-    if (_wgMajorityNativeKept < _wgMajorityFairShare)
-    {
-        ++_wgMajorityNativeKept;
-        return realTeam;
-    }
-
-    // Past the fair share: flip only when it does not worsen the live balance —
-    // with a sparse census (e.g. 1/0) and trickle joins, unconditional flips
-    // would stack the entire majority onto the other side.
-    uint32 const ownInWar   = (realTeam == TEAM_ALLIANCE) ? allianceInWar : hordeInWar;
-    uint32 const otherInWar = (realTeam == TEAM_ALLIANCE) ? hordeInWar : allianceInWar;
-    if (ownInWar > otherInWar)
-        return (_wgMajorityTeam == TEAM_ALLIANCE) ? TEAM_HORDE : TEAM_ALLIANCE;
-
-    ++_wgMajorityNativeKept;
-    return realTeam;
-}
-
-void CFBG::FitPlayerInTeam(Player* player, Battleground* bg)
-{
-    if (!_IsEnableSystem)
-        return;
-
-    if (!bg)
-        bg = player->GetBattleground();
-
-    if (!bg || bg->isArena())
-        return;
-
-    SetForgetBGPlayers(player, true);
-}
-
-void CFBG::SetForgetBGPlayers(Player* player, bool value)
-{
-    _forgetBGPlayersStore[player] = value;
-}
-
-bool CFBG::ShouldForgetBGPlayers(Player* player)
-{
-    return _forgetBGPlayersStore[player];
-}
-
-bool CFBG::HasPendingForget(Player* player) const
-{
-    auto const itr = _forgetBGPlayersStore.find(player);
-    return itr != _forgetBGPlayersStore.end() && itr->second;
-}
-
-void CFBG::DoForgetPlayersInBG(Player* player, Battleground* bg)
-{
-    for (auto const& itr : bg->GetPlayers())
-    {
-        // Here we invalidate players in the bg to the added player
-        WorldPacket data1(SMSG_INVALIDATE_PLAYER, 8);
-        data1 << itr.first;
-        player->GetSession()->SendPacket(&data1);
-
-        if (Player* _player = ObjectAccessor::FindPlayer(itr.first))
+    CfbgBalance::Options options;
+    options.maximum = maximum;
+    options.relaxAtCount = _even ? _evenThreshold : 0;
+    options.allowedDifference = _even && (!_evenThreshold || std::min(teams[0].count, teams[1].count) < _evenThreshold) ? 0 : 1;
+    options.levels = _levels; options.items = _items;
+    options.hunters = _hunters && bg->GetMinLevel() >= _hunterMin && bg->GetMaxLevel() <= _hunterMax;
+    auto assignment = CfbgBalance::Select(metrics, teams, options);
+    std::array<unsigned, 2> selected{};
+    for (size_t i = 0; i < groups.size(); ++i) if (assignment[i] >= 0) selected[assignment[i]] += metrics[i].size;
+    // A handled but unsuccessful formation must not fall back to native premades.
+    if (!fill && (selected[0] < minimum || selected[1] < minimum)) return true;
+    for (size_t i = 0; i < groups.size(); ++i)
+        if (assignment[i] >= 0)
         {
-            player->GetSession()->SendNameQueryOpcode(_player->GetGUID()); // Send namequery answer instantly if player is available
-
-            // Here we invalidate the player added to players in the bg
-            WorldPacket data2(SMSG_INVALIDATE_PLAYER, 8);
-            data2 << player->GetGUID();
-            _player->GetSession()->SendPacket(&data2);
-            _player->GetSession()->SendNameQueryOpcode(player->GetGUID());
+            unsigned t = unsigned(assignment[i]);
+            MoveQueueGroup(queue, bracket, groups[i], TeamValue(t));
+            queue->m_SelectionPools[t].AddGroup(groups[i], maximum - teams[t].count);
         }
-    }
-}
-
-bool CFBG::IsPlayingNative(Player* player)
-{
-    return player->GetTeamId(true) == player->GetBGData().bgTeamId;
-}
-
-std::array<uint32, 2> CFBG::GetProjectedBaseCounts(Battleground* bg, BattlegroundQueue* queue, BattlegroundBracketId bracketId) const
-{
-    if (!bg)
-        return { 0, 0 };
-
-    std::array<uint32, 2> counts{ bg->GetPlayersCountByTeam(TEAM_ALLIANCE), bg->GetPlayersCountByTeam(TEAM_HORDE) };
-
-    // An invite reserves the slot even if the player is disconnected; groups
-    // invited to a different instance are reserved elsewhere and don't count.
-    for (auto const& gInfo : queue->m_QueuedGroups[bracketId][BG_QUEUE_CFBG])
-        if (gInfo->IsInvitedToBGInstanceGUID == bg->GetInstanceID())
-            counts[gInfo->teamId] += gInfo->Players.size();
-
-    // A player between accept and worldport ack is in neither term above (the
-    // accept deleted their ginfo; AddPlayer has not run yet). The BG's invited
-    // ledger still holds every reservation, so clamp up to it; max() degrades
-    // gracefully if either register is skewed.
-    uint32 const computedA = counts[TEAM_ALLIANCE];
-    uint32 const computedH = counts[TEAM_HORDE];
-    counts[TEAM_ALLIANCE] = std::max(computedA, bg->GetInvitedCount(TEAM_ALLIANCE));
-    counts[TEAM_HORDE] = std::max(computedH, bg->GetInvitedCount(TEAM_HORDE));
-
-    // The ledger exceeding the physical + invited-queued tally is the signature
-    // of a leaked reservation steering selection. In-flight accepts trip this
-    // briefly and legitimately, so it stays at debug for operators hunting a
-    // persistent skew.
-    if (counts[TEAM_ALLIANCE] > computedA || counts[TEAM_HORDE] > computedH)
-        LOG_DEBUG("module", "mod-cfbg: instance {} projections clamped by invited ledger (A {}->{}, H {}->{}), possible phantom reservation",
-            bg->GetInstanceID(), computedA, counts[TEAM_ALLIANCE], computedH, counts[TEAM_HORDE]);
-
-    return counts;
-}
-
-void CFBG::SelectBalancedGroups(BattlegroundQueue* queue, BattlegroundBracketId bracketId, Battleground* bg, uint32 maxPerTeam, uint32 allowedDiff)
-{
-    auto base = GetProjectedBaseCounts(bg, queue, bracketId);
-
-    // Base level sums mirror the head counts: in-BG players plus the
-    // invited-not-yet-entered ones (disconnected invitees contribute 0).
-    std::array<uint32, 2> baseLevelSum{};
-    if (bg)
-    {
-        baseLevelSum = { GetBGTeamSumPlayerLevel(bg, TEAM_ALLIANCE), GetBGTeamSumPlayerLevel(bg, TEAM_HORDE) };
-
-        for (auto const& gInfo : queue->m_QueuedGroups[bracketId][BG_QUEUE_CFBG])
-        {
-            if (gInfo->IsInvitedToBGInstanceGUID != bg->GetInstanceID())
-                continue;
-
-            for (auto const& playerGuid : gInfo->Players)
-                if (auto player = ObjectAccessor::FindConnectedPlayer(playerGuid))
-                    baseLevelSum[gInfo->teamId] += player->GetLevel();
-        }
-    }
-
-    std::array<GroupsList, 2> staged;
-    std::array<uint32, 2> stagedCount{};
-    std::array<uint32, 2> stagedLevelSum{};
-    std::array<uint32, 2> stagedIlvlSum{};
-
-    // Stage: greedy FIFO pass onto the smaller projected side; groups are
-    // staged whole -- a premade party is never split.
-    for (auto const& gInfo : queue->m_QueuedGroups[bracketId][BG_QUEUE_CFBG])
-    {
-        if (gInfo->IsInvitedToBGInstanceGUID)
-            continue;
-
-        auto cfInfo = CrossFactionGroupInfo(gInfo);
-
-        TeamBalanceContext ctx;
-        ctx.countA = base[TEAM_ALLIANCE] + stagedCount[TEAM_ALLIANCE];
-        ctx.countH = base[TEAM_HORDE] + stagedCount[TEAM_HORDE];
-
-        ctx.levelSumA = baseLevelSum[TEAM_ALLIANCE] + stagedLevelSum[TEAM_ALLIANCE];
-        ctx.levelSumH = baseLevelSum[TEAM_HORDE] + stagedLevelSum[TEAM_HORDE];
-
-        // ilvl metric: live BG average when reinforcing, staged sums at formation.
-        ctx.avgIlvlA = bg ? GetBGTeamAverageItemLevel(bg, TEAM_ALLIANCE) : stagedIlvlSum[TEAM_ALLIANCE];
-        ctx.avgIlvlH = bg ? GetBGTeamAverageItemLevel(bg, TEAM_HORDE) : stagedIlvlSum[TEAM_HORDE];
-
-        ctx.evenCountA = ctx.countA;
-        ctx.evenCountH = ctx.countH;
-
-        ctx.hunterOverride = bg ? ResolveHunterOverride(bg, cfInfo) : std::nullopt;
-        ctx.fallback = gInfo->teamId;
-
-        TeamId team = ResolveBalancedTeam(ctx);
-
-        // team is the smaller projected side; under a symmetric cap, a group
-        // that does not fit there cannot fit the other side either.
-        if (base[team] + stagedCount[team] + gInfo->Players.size() > maxPerTeam)
-            continue;
-
-        staged[team].emplace_back(gInfo);
-        stagedCount[team] += gInfo->Players.size();
-        stagedLevelSum[team] += cfInfo.SumPlayerLevel;
-        stagedIlvlSum[team] += cfInfo.SumAverageItemLevel;
-    }
-
-    // Repair: move or drop staged groups until the diff fits allowedDiff. Moves
-    // strictly shrink the diff, drops the selection, so the loop terminates.
-    while (true)
-    {
-        uint32 projA = base[TEAM_ALLIANCE] + stagedCount[TEAM_ALLIANCE];
-        uint32 projH = base[TEAM_HORDE] + stagedCount[TEAM_HORDE];
-        uint32 diff = projA > projH ? projA - projH : projH - projA;
-
-        if (diff <= allowedDiff)
-            break;
-
-        TeamId larger = projA > projH ? TEAM_ALLIANCE : TEAM_HORDE;
-        TeamId smaller = larger == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
-
-        // Imbalance rooted in already-entered/invited players; the selection
-        // only narrows the gap -- invite it as-is.
-        if (staged[larger].empty())
-            break;
-
-        // Prefer moving a group across -- nobody loses the invite. Pick the
-        // move landing closest to balance (first staged wins ties).
-        GroupQueueInfo* moveGroup = nullptr;
-        uint32 moveDiff = diff;
-
-        for (auto const& gInfo : staged[larger])
-        {
-            uint32 transfer = gInfo->Players.size() * 2;
-            uint32 newDiff = transfer > diff ? transfer - diff : diff - transfer;
-
-            if (newDiff < moveDiff && base[smaller] + stagedCount[smaller] + gInfo->Players.size() <= maxPerTeam)
-            {
-                moveGroup = gInfo;
-                moveDiff = newDiff;
-            }
-        }
-
-        if (moveGroup)
-        {
-            std::erase(staged[larger], moveGroup);
-            staged[smaller].emplace_back(moveGroup);
-            stagedCount[larger] -= moveGroup->Players.size();
-            stagedCount[smaller] += moveGroup->Players.size();
-            continue;
-        }
-
-        // No useful move: drop the group landing closest to balance; ties drop
-        // the newest. Dropped groups stay queued for the next update.
-        GroupQueueInfo* dropGroup = nullptr;
-        uint32 dropDiff = 0;
-
-        for (auto const& gInfo : staged[larger])
-        {
-            uint32 size = gInfo->Players.size();
-            uint32 newDiff = size > diff ? size - diff : diff - size;
-
-            if (!dropGroup || newDiff < dropDiff || (newDiff == dropDiff && gInfo->JoinTime > dropGroup->JoinTime))
-            {
-                dropGroup = gInfo;
-                dropDiff = newDiff;
-            }
-        }
-
-        std::erase(staged[larger], dropGroup);
-        stagedCount[larger] -= dropGroup->Players.size();
-    }
-
-    // Invite: write the staged selection into the pools; caps were enforced
-    // while staging, so every AddGroup succeeds.
-    queue->m_SelectionPools[TEAM_ALLIANCE].Init();
-    queue->m_SelectionPools[TEAM_HORDE].Init();
-
-    for (auto team : { TEAM_ALLIANCE, TEAM_HORDE })
-    {
-        for (auto const& gInfo : staged[team])
-        {
-            gInfo->teamId = team;
-            queue->m_SelectionPools[team].AddGroup(gInfo, maxPerTeam - base[team]);
-        }
-    }
-}
-
-bool CFBG::CheckCrossFactionMatch(BattlegroundQueue* queue, BattlegroundBracketId bracket_id, uint32 minPlayers, uint32 maxPlayers)
-{
-    if (!IsEnableSystem())
-        return false;
-
-    bool isTesting = sBattlegroundMgr->isTesting();
-    SelectBalancedGroups(queue, bracket_id, nullptr, maxPlayers, isTesting ? maxPlayers : (IsEnableEvenTeams() ? 0 : 1));
-
-    // Mirror core CanStartMatch's testing arm: under .debug bg a single
-    // non-empty pool is enough to start (1v0), so skip the pool reset.
-    if (isTesting && (queue->m_SelectionPools[TEAM_ALLIANCE].GetPlayerCount() || queue->m_SelectionPools[TEAM_HORDE].GetPlayerCount()))
-        return true;
-
-    // Return when we're ready to start a BG, if we're in startup process
-    if (queue->m_SelectionPools[TEAM_ALLIANCE].GetPlayerCount() >= minPlayers &&
-        queue->m_SelectionPools[TEAM_HORDE].GetPlayerCount() >= minPlayers)
-        return true;
-
-    // Return false when we didn't manage to fill the BattleGround in Filling "mode".
-    // reset selectionpool for further attempts
-    queue->m_SelectionPools[TEAM_ALLIANCE].Init();
-    queue->m_SelectionPools[TEAM_HORDE].Init();
     return true;
 }
 
-bool CFBG::FillPlayersToCFBG(BattlegroundQueue* bgqueue, Battleground* bg, BattlegroundBracketId bracket_id)
+bool CFBG::CanJoin(Player* player, Group* group)
 {
-    if (!IsEnableSystem() || bg->isArena() || bg->isRated())
-        return false;
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!_enabled || !group || (!group->isRaidGroup() && group->GetMembersCount() <= _groupLimit)) return true;
+    ChatHandler(player->GetSession()).PSendSysMessage("CFBG groups are limited to %u players; raid groups cannot queue.", _groupLimit);
+    return false;
+}
 
-    uint32 allowedDiff = 1;
-
-    if (IsEnableEvenTeams())
-    {
-        // Threshold 0 enforces even teams at all sizes; otherwise relax to
-        // diff <= 1 once the projected total reaches threshold * 2.
-        uint32 threshold = EvenTeamsMaxPlayersThreshold();
-        auto base = GetProjectedBaseCounts(bg, bgqueue, bracket_id);
-
-        if (!threshold || base[TEAM_ALLIANCE] + base[TEAM_HORDE] < threshold * 2)
-            allowedDiff = 0;
-    }
-
-    // Cap on GetMaxPlayersPerTeam, not GetFreeSlotsForTeam: the latter imposes
-    // no relative cap with Battleground.InvitationType = 0.
-    SelectBalancedGroups(bgqueue, bracket_id, bg, bg->GetMaxPlayersPerTeam(), allowedDiff);
+bool CFBG::Announce(BattlegroundQueue* queue, Battleground* bg, Player* p, uint8 bracket, uint32 min, uint32 max)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!_enabled || bg->isArena()) return false;
+    uint32 count=0;
+    for (unsigned i=0;i<BG_QUEUE_GROUP_TYPES_COUNT;++i)
+        for (auto* group : queue->m_QueuedGroups[bracket][i])
+            if (!group->IsInvitedToBGInstanceGUID) count += uint32(group->Players.size());
+    std::ostringstream text;
+    text << "[CFBG] " << bg->GetName() << " (" << min << '-' << max << "): " << count << " queued; " << bg->GetMinPlayersPerTeam()*2 << " needed.";
+    if (_showPlayerName) text << " Joined: " << p->GetName() << '.';
+    ChatHandler handler(p->GetSession());
+    if (sWorld->GetBoolConfig(WorldBoolConfigs::CONFIG_BATTLEGROUND_QUEUE_ANNOUNCER_PLAYERONLY)) handler.SendSysMessage(text.str().c_str());
+    else handler.SendGlobalSysMessage(text.str().c_str());
     return true;
 }
 
-bool CFBG::isClassJoining(uint8 _class, Player* player, uint32 minLevel)
+bool CFBG::PartyCommitted(Player* player, Battleground* bg)
 {
-    if (!player)
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    Group* group = player->GetOriginalGroup();
+    if (!group) group = player->GetGroup();
+    if (!group || group->isBGGroup()) return false;
+    auto queueType = BattlegroundMgr::BGQueueTypeId(bg->GetTypeID(), 0);
+    auto& queue = sBattlegroundMgr->GetBattlegroundQueue(queueType);
+    for (GroupReference* itr = group->GetFirstMember(); itr; itr = itr->next())
     {
-        return false;
+        Player* p = itr->GetSource();
+        if (!p || p == player) continue;
+        if (p->GetBattlegroundId() == bg->GetInstanceID()) return true;
+        GroupQueueInfo info;
+        if (queue.GetPlayerGroupInfoData(p->GetGUID(), &info) && info.IsInvitedToBGInstanceGUID == bg->GetInstanceID()) return true;
     }
-
-    return player->getClass() == _class && (player->GetLevel() >= minLevel);
+    return false;
 }
 
-void CFBG::UpdateForget(Player* player)
+void CFBG::BeforeAdd(Battleground* bg, Player* p)
 {
-    Battleground* bg = player->GetBattleground();
-    if (bg && ShouldForgetBGPlayers(player))
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (bg->isArena()) return;
+    if (_enabled || p->GetBGTeam() != p->GetNativeTeam()) _crossFactionBGs.insert(bg->GetInstanceID());
+    if (_crossFactionBGs.count(bg->GetInstanceID())) PrepareAV(bg);
+    uint32 team = p->GetBGTeam();
+    uint32 other = team == ALLIANCE ? HORDE : ALLIANCE;
+    if (_enabled && _entry && !PartyCommitted(p, bg) && bg->GetInvitedCount(team) > bg->GetInvitedCount(other) + 1 && bg->GetInvitedCount(other) < bg->GetMaxPlayersPerTeam())
     {
-        DoForgetPlayersInBG(player, bg);
-        SetForgetBGPlayers(player, false);
+        bg->DecreaseInvitedCount(team); bg->IncreaseInvitedCount(other);
+        p->SetBGTeam(other); team = other;
+        float x,y,z,o; bg->GetTeamStartLoc(team,x,y,z,o); p->NearTeleportTo(x,y,z,o);
+    }
+    // Honor already-issued opposite-team invites even after live disable.
+    if (_enabled || team != p->GetNativeTeam()) Apply(p, TeamIndex(team));
+}
+void CFBG::AfterAdd(Battleground* bg, Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (_enabled && !bg->isArena() && _cooldowns) p->RemoveArenaSpellCooldowns(true);
+}
+void CFBG::BalanceAtStart(Battleground* bg)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (_crossFactionBGs.count(bg->GetInstanceID())) PrepareAV(bg);
+    if (!_enabled || !_start || bg->isArena()) return;
+    while (true)
+    {
+        uint32 a = bg->GetPlayersCountByTeam(ALLIANCE), h = bg->GetPlayersCountByTeam(HORDE);
+        if (a <= h + 1 && h <= a + 1) break;
+        uint32 large = a > h ? ALLIANCE : HORDE, smallerTeam = a > h ? HORDE : ALLIANCE;
+        Player* candidate = nullptr;
+        for (auto const& member : bg->GetPlayers())
+            if (member.second.Team == large)
+                if (Player* p = ObjectAccessor::FindPlayer(member.first))
+                    if (!PartyCommitted(p, bg)) { candidate = p; break; }
+        if (!candidate || !bg->ChangePlayerTeam(candidate, smallerTeam)) break;
+        Apply(candidate, TeamIndex(smallerTeam));
+        float x,y,z,o; bg->GetTeamStartLoc(smallerTeam,x,y,z,o); candidate->NearTeleportTo(x,y,z,o);
     }
 }
 
-void CFBG::SendMessageQueue(BattlegroundQueue* bgQueue, Battleground* bg, PvPDifficultyEntry const* bracketEntry, Player* leader)
+void CFBG::PrepareAV(Battleground* bg)
 {
-    BattlegroundBracketId bracketId = bracketEntry->GetBracketId();
+    if (bg->GetTypeID(true) != BattlegroundTypeId::BATTLEGROUND_AV) return;
+    // Validated against SFDB 26.002. These sixteen commanders use race-specific
+    // factions (and neutral difficulty variants). Change instance creatures,
+    // never their database templates, so servers without CFBG remain intact.
+    for (uint32 i=0; i<bg->BgCreatures.size(); ++i)
+        if (bg->BgCreatures[i])
+            if (Creature* creature = bg->GetBGCreature(i))
+                switch (creature->GetEntry())
+                {
+                    case 14187: case 14188: case 22528: case 22699:
+                    case 31924: case 31963: case 37240: case 37281:
+                        creature->setFaction(1216); break;
+                    case 14185: case 14186: case 22712: case 22569:
+                    case 32049: case 32053: case 37370: case 37374:
+                        creature->setFaction(1214); break;
+                    default: break;
+                }
+}
 
-    auto bgName = bg->GetName();
-    uint32 q_min_level = std::min(bracketEntry->minLevel, (uint32)80);
-    uint32 q_max_level = std::min(bracketEntry->maxLevel, (uint32)80);
-    uint32 MinPlayers = GetMinPlayersPerTeam(bg, bracketEntry) * 2;
-    uint32 qTotal = bgQueue->GetPlayersCountInGroupsQueue(bracketId, (BattlegroundQueueGroupTypes)BG_QUEUE_CFBG);
-
-    if (sWorld->getBoolConfig(CONFIG_BATTLEGROUND_QUEUE_ANNOUNCER_PLAYERONLY))
+uint8 CFBG::ChooseVisualRace(Player* p, TeamId team)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    auto preferred = _preferences.find(p->GetGUID());
+    if (!_random && preferred != _preferences.end() && preferred->second && ValidRace(p, preferred->second, team)) return preferred->second;
+    std::vector<uint8> choices;
+    for (auto const& race : VisualRaces) if (ValidRace(p, race.first, team)) choices.push_back(race.first);
+    if (choices.empty()) return 0;
+    static thread_local std::mt19937 random(std::random_device{}());
+    return choices[std::uniform_int_distribution<size_t>(0, choices.size()-1)(random)];
+}
+void CFBG::Apply(Player* p, TeamId team, bool battlefield)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (team == p->GetNativeTeamId()) { Restore(p); return; }
+    auto old = _appearances.find(p->GetGUID());
+    if (old != _appearances.end() && old->second.team == team)
     {
-        ChatHandler(leader->GetSession()).PSendSysMessage("CFBG {} (Levels: {} - {}). Registered: {}/{}", bgName.c_str(), q_min_level, q_max_level, qTotal, MinPlayers);
+        p->SetTemporaryTeam(team);
+        Reapply(p);
+        return;
+    }
+    uint32 original = old == _appearances.end() ? p->GetNativeDisplayId() : old->second.originalModel;
+    uint8 race = ChooseVisualRace(p, team);
+    PlayerInfo const* info = race ? sObjectMgr->GetPlayerInfo(race, p->getClass()) : nullptr;
+    uint32 model = info ? (p->getGender() == GENDER_FEMALE ? info->displayId_f : info->displayId_m) : original;
+    CFBGAppearance appearance{original, model, race, team, battlefield};
+    if (old != _appearances.end())
+    {
+        appearance.frostwolfReaction=old->second.frostwolfReaction;
+        appearance.stormpikeReaction=old->second.stormpikeReaction;
     }
     else
     {
-        if (sWorld->getBoolConfig(CONFIG_BATTLEGROUND_QUEUE_ANNOUNCER_TIMED))
-        {
-            if (bgQueue->GetQueueAnnouncementTimer(bracketEntry->bracketId) < 0)
+        for (auto entry : {std::pair<uint32,int32*>(1214,&appearance.frostwolfReaction),std::pair<uint32,int32*>(1216,&appearance.stormpikeReaction)})
+            if (FactionTemplateEntry const* faction=sFactionTemplateStore.LookupEntry(entry.first))
+                if (ReputationRank const* rank=p->GetReputationMgr().GetForcedRankIfAny(faction)) *entry.second=int32(*rank);
+    }
+    _appearances[p->GetGUID()] = appearance;
+    p->SetTemporaryTeam(team);
+    Reapply(p);
+}
+void CFBG::Reapply(Player* p, bool model)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    auto itr = _appearances.find(p->GetGUID());
+    if (itr == _appearances.end()) return;
+    auto const& appearance = itr->second;
+    // A missing visual candidate must not prevent real team hostility.
+    uint8 factionRace = appearance.race ? appearance.race : (appearance.team == TEAM_ALLIANCE ? 1 : 2);
+    if (ChrRacesEntry const* race = sChrRacesStore.LookupEntry(factionRace)) p->setFaction(race->FactionID);
+    for (Unit* unit : p->m_Controlled) if (unit) unit->setFaction(p->getFaction());
+    if (model)
+    {
+        p->SetNativeDisplayId(appearance.model);
+        p->RestoreDisplayId();
+    }
+    if (p->InBattleground() && p->GetBattleground() && p->GetBattleground()->GetTypeID(true) == BattlegroundTypeId::BATTLEGROUND_AV)
+    {
+        p->GetReputationMgr().ApplyForceReaction(729, appearance.team == TEAM_HORDE ? REP_FRIENDLY : REP_HOSTILE, true);
+        p->GetReputationMgr().ApplyForceReaction(730, appearance.team == TEAM_ALLIANCE ? REP_FRIENDLY : REP_HOSTILE, true);
+        if (model) p->GetReputationMgr().SendForceReactions();
+    }
+}
+void CFBG::Restore(Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    auto itr = _appearances.find(p->GetGUID());
+    if (itr == _appearances.end()) return;
+    if (p->IsCharmed()) p->RemoveCharmAuras();
+    uint32 original = itr->second.originalModel;
+    int32 frostwolf=itr->second.frostwolfReaction, stormpike=itr->second.stormpikeReaction;
+    _appearances.erase(itr); // Faction-update hook must not reapply during restoration.
+    _updateTimers.erase(p->GetGUID());
+    p->ClearTemporaryTeam();
+    p->SetNativeDisplayId(original); p->RestoreDisplayId();
+    for (Unit* unit : p->m_Controlled) if (unit) unit->setFaction(p->getFaction());
+    p->GetReputationMgr().ApplyForceReaction(729, frostwolf>=0 ? ReputationRank(frostwolf) : REP_FRIENDLY, frostwolf>=0);
+    p->GetReputationMgr().ApplyForceReaction(730, stormpike>=0 ? ReputationRank(stormpike) : REP_FRIENDLY, stormpike>=0);
+    p->GetReputationMgr().SendForceReactions();
+}
+
+void CFBG::Removed(Battleground* bg, Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    Restore(p);
+    if (!bg->GetPlayersSize()) _crossFactionBGs.erase(bg->GetInstanceID());
+}
+void CFBG::Resurrect(Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    auto itr = _appearances.find(p->GetGUID());
+    if (itr != _appearances.end()) Reapply(p, !itr->second.battlefield || _wgResurrect);
+}
+
+void CFBG::Login(Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!_checkedPreferences)
+    {
+        _preferencesAvailable = bool(CharacterDatabase.Query("SHOW TABLES LIKE 'mod_cfbg_preferences'"));
+        _checkedPreferences = true;
+        if (!_preferencesAvailable) SF_LOG_WARN("module.cfbg", "Preference table missing; install module character SQL for persistent race choices.");
+    }
+    if (_preferencesAvailable)
+        if (QueryResult result = CharacterDatabase.PQuery("SELECT race FROM mod_cfbg_preferences WHERE guid=%u", p->GetGUIDLow()))
+            _preferences[p->GetGUID()] = result->Fetch()[0].GetUInt8();
+    if (p->InBattleground() && p->GetBattleground() && !p->GetBattleground()->isArena() && p->GetBGTeam() != p->GetNativeTeam()) Apply(p, TeamIndex(p->GetBGTeam()));
+    // A battlefield zone-entry callback can precede OnLogin. Apply the saved
+    // preference now if the entry used its provisional random appearance.
+    auto appearance = _appearances.find(p->GetGUID());
+    if (!_random && appearance != _appearances.end())
+    {
+        uint8 race = ChooseVisualRace(p, appearance->second.team);
+        if (race)
+            if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race,p->getClass()))
             {
-                bgQueue->SetQueueAnnouncementTimer(bracketEntry->bracketId, sWorld->getIntConfig(CONFIG_BATTLEGROUND_QUEUE_ANNOUNCER_TIMER));
+                appearance->second.race = race;
+                appearance->second.model = p->getGender()==GENDER_FEMALE ? info->displayId_f : info->displayId_m;
+                Reapply(p);
             }
-        }
-        else
-        {
-            // Defer to the shared core announcer (cross-faction); spam-window and
-            // Limit gating now happen centrally in BattlegroundQueueAnnouncerUpdate.
-            if (bgQueue->GetQueueAnnouncementTimer(bracketId) < 0)
-            {
-                bgQueue->SetQueueAnnouncementTimer(bracketId, BG_QUEUE_ANNOUNCER_IMMEDIATE_DEBOUNCE, true);
-            }
-        }
+    }
+}
+void CFBG::Logout(Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    // Battlefield leave executes in RemoveFromWorld after this callback. Keep
+    // the assigned team until its team-indexed records have been removed.
+    auto appearance = _appearances.find(p->GetGUID());
+    if (appearance != _appearances.end() && !appearance->second.battlefield) Restore(p);
+    _preferences.erase(p->GetGUID()); _updateTimers.erase(p->GetGUID());
+}
+void CFBG::Delete(uint64 guid)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    _preferences.erase(guid); _appearances.erase(guid); _warAssignments.erase(guid); _pendingAssignments.erase(guid); _updateTimers.erase(guid);
+    if (_preferencesAvailable) CharacterDatabase.PExecute("DELETE FROM mod_cfbg_preferences WHERE guid=%u", GUID_LOPART(guid));
+}
+void CFBG::Update(Player* p, uint32 diff)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    auto itr = _appearances.find(p->GetGUID());
+    if (itr == _appearances.end()) return;
+    uint32& timer = _updateTimers[p->GetGUID()];
+    timer += diff; if (timer < 1000) return; timer = 0;
+    if (!itr->second.battlefield)
+    {
+        if (!p->InBattleground()) Restore(p);
+        else Reapply(p, false);
     }
 }
 
-bool CFBG::IsRaceValidForFaction(uint8 teamId, uint8 race)
+bool CFBG::IsWG(Battlefield* bf) const {
+    std::lock_guard<std::recursive_mutex> guard(_mutex); return bf && bf->GetTypeId() == BATTLEFIELD_WG; }
+void CFBG::BFEnter(Battlefield* bf, Player* p)
 {
-    for (auto const& raceVariable : _raceInfo)
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!IsWG(bf) || !bf->IsWarTime() || p->InBattleground()) return;
+    auto lock = _warAssignments.find(p->GetGUID());
+    if (lock != _warAssignments.end() && (_wgLock || !_enabled) && bf->TransferPlayerTeam(p, lock->second))
+        Apply(p, lock->second, true);
+    else if (_enabled && _wgEnabled && !_skipClasses.count(p->getClass()) && !bf->HasWarVacancy(p->GetNativeTeamId(), p->GetGUID()))
     {
-        if (race == raceVariable.RaceId && teamId == raceVariable.TeamId)
-        {
-            return true;
-        }
+        TeamId opposite = p->GetNativeTeamId() == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
+        if (bf->HasWarVacancy(opposite, p->GetGUID()) && bf->TransferPlayerTeam(p, opposite))
+            Apply(p, opposite, true);
     }
-
-    return false;
+}
+void CFBG::BFChoose(Battlefield* bf, Player* p, TeamId& team)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!IsWG(bf) || p->InBattleground()) return;
+    auto lock = _warAssignments.find(p->GetGUID());
+    if (lock != _warAssignments.end() && (_wgLock || !_enabled)) { team = lock->second; return; }
+    if (!_enabled || !_wgEnabled || _skipClasses.count(p->getClass())) return;
+    if (!_censusValid)
+    {
+        std::set<uint64> census;
+        for (unsigned t = 0; t < 2; ++t)
+        {
+            census.insert(bf->GetPlayersInWar(TeamId(t)).begin(), bf->GetPlayersInWar(TeamId(t)).end());
+            for (auto const& invite : bf->GetInvitedPlayers(TeamId(t))) census.insert(invite.first);
+        }
+        std::array<unsigned,2> natives{};
+        for (uint64 guid : census) if (Player* member = ObjectAccessor::FindPlayer(guid)) ++natives[member->GetNativeTeamId()];
+        _majority = natives[0] >= natives[1] ? 0 : 1;
+        _fairShare = (natives[0] + natives[1] + 1) / 2; _nativeKept = 0; _censusValid = true;
+    }
+    std::array<unsigned,2> live = {{unsigned(bf->GetPlayersInWar(TEAM_ALLIANCE).size()), unsigned(bf->GetPlayersInWar(TEAM_HORDE).size())}};
+    team = TeamId(CfbgBalance::WintergraspTeam(p->GetNativeTeamId(), _majority, _fairShare, _nativeKept, live, _wgPriority));
+    if (!bf->HasWarVacancy(team, p->GetGUID()))
+    {
+        TeamId other = team == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
+        team = bf->HasWarVacancy(other, p->GetGUID()) ? other : p->GetTeamId();
+    }
+    _pendingAssignments[p->GetGUID()] = team;
+}
+void CFBG::BFJoined(Battlefield* bf, Player* p, bool success)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!IsWG(bf)) return;
+    auto pending = _pendingAssignments.find(p->GetGUID());
+    if (pending != _pendingAssignments.end())
+    {
+        if (success)
+        {
+            if (!_warAssignments.count(p->GetGUID()) && p->GetNativeTeamId() == _majority && pending->second == _majority) ++_nativeKept;
+            _warAssignments[p->GetGUID()] = pending->second;
+        }
+        _pendingAssignments.erase(pending);
+    }
+    if (success && (_enabled && _wgEnabled || _warAssignments.count(p->GetGUID()))) Apply(p, p->GetTeamId(), true);
+    if (success && _appearances.count(p->GetGUID())) _warAssignments[p->GetGUID()] = p->GetTeamId();
+    if (!success)
+    {
+        bf->TransferPlayerTeam(p, p->GetNativeTeamId());
+        Restore(p);
+    }
+}
+void CFBG::BFLeft(Battlefield* bf, Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!IsWG(bf)) return;
+    _pendingAssignments.erase(p->GetGUID());
+    auto itr = _appearances.find(p->GetGUID());
+    if (itr != _appearances.end() && itr->second.battlefield)
+    {
+        bf->TransferPlayerTeam(p, p->GetNativeTeamId());
+        Restore(p);
+    }
+}
+void CFBG::BFBeforeEnd(Battlefield* bf)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!IsWG(bf)) return;
+    // Skyfire grants honor/achievements itself. Only complete the native
+    // version of the victory quest for winners; never recast reward spells.
+    for (uint64 guid : bf->GetPlayersInWar(bf->GetDefenderTeam()))
+        if (Player* p = ObjectAccessor::FindPlayer(guid))
+            if (_warAssignments.count(guid)) p->AreaExploredOrEventHappens(p->GetNativeTeamId() == TEAM_ALLIANCE ? 13181 : 13183);
+}
+void CFBG::BFEnded(Battlefield* bf)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!IsWG(bf)) return;
+    std::set<uint64> affected;
+    for (auto const& entry : _appearances) if (entry.second.battlefield) affected.insert(entry.first);
+    for (uint64 guid : affected)
+        if (Player* p = ObjectAccessor::FindPlayer(guid))
+        {
+            bf->TransferPlayerTeam(p, p->GetNativeTeamId()); Restore(p);
+        }
+    _warAssignments.clear(); _pendingAssignments.clear(); _censusValid = false;
+}
+void CFBG::BFKill(Battlefield* bf, Player* killer, Unit* victim)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!IsWG(bf) || !killer || !victim || killer == victim || victim->GetTypeId() != TypeID::TYPEID_PLAYER) return;
+    if (!_enabled && !_warAssignments.count(killer->GetGUID())) return;
+    killer->KilledMonsterCredit(killer->GetNativeTeamId() == TEAM_ALLIANCE ? 31086 : 39019);
+}
+void CFBG::Reputation(Player* p, uint32& faction, int32&, bool)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (!_appearances.count(p->GetGUID()) || !p->InBattleground()) return;
+    if (faction == 729 && p->GetNativeTeamId() == TEAM_ALLIANCE) faction = 730;
+    else if (faction == 730 && p->GetNativeTeamId() == TEAM_HORDE) faction = 729;
+}
+void CFBG::TeamChat(Player* p, ChatMsg type, Language& lang)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    if (lang == Language::LANG_ADDON) return;
+    Battleground* bg = p->GetBattleground();
+    Battlefield* bf = sBattlefieldMgr->GetBattlefieldToZoneId(p->GetZoneId());
+    bool bgActive = bg && !bg->isArena() && (_enabled || _crossFactionBGs.count(bg->GetInstanceID()));
+    bool bfActive = IsWG(bf) && bf->GetPlayersInWar(p->GetTeamId()).count(p->GetGUID()) && (_enabled && _wgEnabled || _warAssignments.count(p->GetGUID()));
+    if ((bgActive || bfActive) && (type == ChatMsg::CHAT_MSG_PARTY || type == ChatMsg::CHAT_MSG_RAID || type == ChatMsg::CHAT_MSG_RAID_WARNING || type == ChatMsg::CHAT_MSG_INSTANCE || type == ChatMsg::CHAT_MSG_INSTANCE_LEADER)) lang = Language::LANG_UNIVERSAL;
+}
+bool CFBG::ChooseRace(ChatHandler* handler, std::string input)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    Player* p = handler->GetSession()->GetPlayer();
+    if (_random) { handler->SendSysMessage("Race selection is disabled by CFBG.RandomRaceSelection."); return true; }
+    std::transform(input.begin(), input.end(), input.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    uint8 race = 0; bool found = input == "random";
+    TeamId opposite = p->GetNativeTeamId() == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
+    for (auto const& candidate : VisualRaces)
+        if (input == candidate.second) { race = candidate.first; found = ValidRace(p, race, opposite); break; }
+    if (!found) { handler->SendSysMessage("Invalid opposite-faction race/class/model. Use random to reset."); return false; }
+    _preferences[p->GetGUID()] = race;
+    if (_preferencesAvailable) CharacterDatabase.PExecute("REPLACE INTO mod_cfbg_preferences (guid,race) VALUES (%u,%u)", p->GetGUIDLow(), uint32(race));
+    handler->SendSysMessage(_preferencesAvailable ? "CFBG race preference saved; applies on your next PvP entry." : "CFBG preference set for this session; character SQL is not installed.");
+    return true;
+}
+void CFBG::Debug(ChatHandler* handler, Player* p)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    auto state = _appearances.find(p->GetGUID());
+    auto pref = _preferences.find(p->GetGUID());
+    handler->PSendSysMessage("CFBG %s: enabled=%u native=%u current=%u BG=%u realRace=%u preference=%u temporary=%u model=%u nativeModel=%u", p->GetName().c_str(), _enabled, uint32(p->GetNativeTeamId()), uint32(p->GetTeamId()), p->GetBGTeam(), uint32(p->getRace()), pref == _preferences.end() ? 0u : uint32(pref->second), p->HasTemporaryTeam(), p->GetDisplayId(), p->GetNativeDisplayId());
+    if (state != _appearances.end()) handler->PSendSysMessage("Visual race=%u model=%u originalModel=%u battlefield=%u", uint32(state->second.race), state->second.model, state->second.originalModel, state->second.battlefield);
+    auto lock = _warAssignments.find(p->GetGUID());
+    if (lock != _warAssignments.end()) handler->PSendSysMessage("Wintergrasp war assignment=%u", uint32(lock->second));
+}
+void CFBG::BattlefieldList(ChatHandler* handler, uint32 id)
+{
+    std::lock_guard<std::recursive_mutex> guard(_mutex);
+    Battlefield* bf = sBattlefieldMgr->GetBattlefieldByBattleId(id);
+    if (!bf) { handler->SendSysMessage("Battlefield not found."); return; }
+    handler->PSendSysMessage("Battlefield %u: %s, max=%u per team", id, bf->IsWarTime() ? "WAR" : "PEACE", bf->GetMaxPlayersPerTeam());
+    for (unsigned t=0;t<2;++t) handler->PSendSysMessage("%s: zone=%u queue=%u invited=%u war=%u", t ? "Horde" : "Alliance", uint32(bf->GetPlayersInZone(TeamId(t)).size()), uint32(bf->GetPlayersInQueue(TeamId(t)).size()), uint32(bf->GetInvitedPlayers(TeamId(t)).size()), uint32(bf->GetPlayersInWar(TeamId(t)).size()));
 }
