@@ -1,6 +1,7 @@
 /* Copyright since 2019 AzerothCore contributors. MIT; see ../LICENSE. */
 #include "CFBG.h"
 #include "CFBGBalance.h"
+#include "CFBGAppearance.h"
 #include "Battlefield.h"
 #include "BattlefieldMgr.h"
 #include "Battleground.h"
@@ -9,15 +10,18 @@
 #include "Chat.h"
 #include "Config.h"
 #include "Creature.h"
+#include "Corpse.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
 #include "Group.h"
+#include "Guild.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "ReputationMgr.h"
 #include "WorldSession.h"
+#include "WorldSocket.h"
 #include "Util.h"
 #include <algorithm>
 #include <cctype>
@@ -361,7 +365,7 @@ void CFBG::Reapply(Player* p, bool model)
     std::scoped_lock guard(_mutex);
     auto itr = _appearances.find(p->GetGUID());
     if (itr == _appearances.end()) return;
-    auto const& appearance = itr->second;
+    auto& appearance = itr->second;
     // A missing visual candidate must not prevent real team hostility.
     uint8 factionRace = appearance.race ? appearance.race : (appearance.team == TEAM_ALLIANCE ? 1 : 2);
     if (ChrRacesEntry const* race = sChrRacesStore.LookupEntry(factionRace)) p->setFaction(race->FactionID);
@@ -371,6 +375,7 @@ void CFBG::Reapply(Player* p, bool model)
         p->SetNativeDisplayId(appearance.model);
         p->RestoreDisplayId();
     }
+    RefreshAppearance(p, appearance);
     if (p->InBattleground() && p->GetBattleground() && p->GetBattleground()->GetTypeID(true) == BattlegroundTypeId::BATTLEGROUND_AV)
     {
         p->GetReputationMgr().ApplyForceReaction(729, appearance.team == TEAM_HORDE ? REP_FRIENDLY : REP_HOSTILE, true);
@@ -378,6 +383,87 @@ void CFBG::Reapply(Player* p, bool model)
         if (model) p->GetReputationMgr().SendForceReactions();
     }
 }
+void CFBG::RefreshAppearance(Player* p, CFBGAppearance& appearance) const
+{
+    bool clone = p->HasAuraType(SPELL_AURA_CLONE_CASTER);
+    if (bool visual = appearance.race && p->GetDisplayId() == appearance.model && !clone;
+        !visual || (p->HasFlag(UNIT_FIELD_FLAGS2, UNIT_FLAG2_MIRROR_IMAGE) && !appearance.mirrorImageOwned))
+    {
+        appearance.mirrorData.clear();
+        if (appearance.mirrorImageOwned && !clone)
+            p->RemoveFlag(UNIT_FIELD_FLAGS2, UNIT_FLAG2_MIRROR_IMAGE);
+        appearance.mirrorImageOwned = false;
+    }
+    else
+        SendAppearance(p, appearance);
+    RefreshCorpseAppearance(p, appearance);
+}
+
+void CFBG::SendAppearance(Player* p, CFBGAppearance& appearance) const
+{
+    CFBGVisualData data;
+    data.player = p->GetGUID();
+    if (Guild const* guild = p->GetGuild()) data.guild = guild->GetGUID();
+    data.model = appearance.model;
+    data.race = appearance.race;
+    data.playerClass = p->getClass();
+    data.gender = p->getGender();
+    constexpr std::array<EquipmentSlots, 11> slots = {EQUIPMENT_SLOT_HEAD, EQUIPMENT_SLOT_SHOULDERS,
+        EQUIPMENT_SLOT_BODY, EQUIPMENT_SLOT_CHEST, EQUIPMENT_SLOT_WAIST, EQUIPMENT_SLOT_LEGS,
+        EQUIPMENT_SLOT_FEET, EQUIPMENT_SLOT_WRISTS, EQUIPMENT_SLOT_HANDS, EQUIPMENT_SLOT_TABARD, EQUIPMENT_SLOT_BACK};
+    for (std::size_t index = 0; index < slots.size(); ++index)
+    {
+        EquipmentSlots slot = slots[index];
+        if ((slot == EQUIPMENT_SLOT_HEAD && p->HasFlag(PLAYER_FIELD_PLAYER_FLAGS, PLAYER_FLAGS_HIDE_HELM)) ||
+            (slot == EQUIPMENT_SLOT_BACK && p->HasFlag(PLAYER_FIELD_PLAYER_FLAGS, PLAYER_FLAGS_HIDE_CLOAK)))
+            continue;
+        uint32 entry = p->GetUInt32Value(PLAYER_FIELD_VISIBLE_ITEMS + slot * 2);
+        if (ItemTemplate const* item = sObjectMgr->GetItemTemplate(entry))
+            data.equipment[index] = item->DisplayInfoID;
+    }
+    WorldPacket packet = BuildCFBGAppearancePacket(data);
+    std::vector<uint8> snapshot(packet.contents(), packet.contents() + packet.size());
+    bool changed = snapshot != appearance.mirrorData;
+    appearance.mirrorData = std::move(snapshot);
+    appearance.mirrorImageOwned = true;
+    p->SetFlag(UNIT_FIELD_FLAGS2, UNIT_FLAG2_MIRROR_IMAGE);
+    if (changed && p->IsInWorld()) p->SendMessageToSet(&packet, true);
+}
+
+void CFBG::RefreshCorpseAppearance(Player const* p, CFBGAppearance& appearance) const
+{
+    if (!appearance.race) return;
+    Corpse* corpse = p->GetCorpse();
+    if (!corpse || corpse->GetUInt32Value(CORPSE_FIELD_DISPLAY_ID) != appearance.model) return;
+    if (appearance.corpse != corpse->GetGUID())
+    {
+        appearance.corpse = corpse->GetGUID();
+        appearance.corpseSkin = corpse->GetUInt32Value(CORPSE_FIELD_SKIN_ID);
+        appearance.corpseFacialHair = corpse->GetUInt32Value(CORPSE_FIELD_FACIAL_HAIR_STYLE_ID);
+    }
+    corpse->SetUInt32Value(CORPSE_FIELD_SKIN_ID,
+        (appearance.corpseSkin & 0x00FF00FFu) | (uint32(appearance.race) << 8));
+    corpse->SetUInt32Value(CORPSE_FIELD_FACIAL_HAIR_STYLE_ID, 0);
+}
+
+void CFBG::MirrorImageData(WorldSocket* socket, WorldPacket& request)
+{
+    uint64 guid;
+    uint32 model;
+    if (!ReadCFBGAppearanceRequest(request, guid, model)) return;
+    WorldPacket response(SMSG_MIRROR_IMAGE_COMPONENTED_DATA);
+    {
+        std::scoped_lock guard(_mutex);
+        auto appearance = _appearances.find(guid);
+        if (appearance == _appearances.end() || appearance->second.model != model || appearance->second.mirrorData.empty())
+            return;
+        response.append(appearance->second.mirrorData.data(), appearance->second.mirrorData.size());
+    }
+    // Answer the client request through the existing network hook. No character
+    // race/customization fields are replaced, so saving during PvP stays native.
+    socket->SendPacket(response);
+}
+
 void CFBG::Restore(Player* p)
 {
     std::scoped_lock guard(_mutex);
@@ -387,6 +473,15 @@ void CFBG::Restore(Player* p)
     uint32 original = itr->second.originalModel;
     int32 frostwolf=itr->second.frostwolfReaction;
     int32 stormpike=itr->second.stormpikeReaction;
+    if (itr->second.mirrorImageOwned && !p->HasAuraType(SPELL_AURA_CLONE_CASTER))
+        p->RemoveFlag(UNIT_FIELD_FLAGS2, UNIT_FLAG2_MIRROR_IMAGE);
+    if (Corpse* corpse = p->GetCorpse())
+        if (itr->second.corpse == corpse->GetGUID())
+        {
+            corpse->SetUInt32Value(CORPSE_FIELD_DISPLAY_ID, original);
+            corpse->SetUInt32Value(CORPSE_FIELD_SKIN_ID, itr->second.corpseSkin);
+            corpse->SetUInt32Value(CORPSE_FIELD_FACIAL_HAIR_STYLE_ID, itr->second.corpseFacialHair);
+        }
     _appearances.erase(itr); // Faction-update hook must not reapply during restoration.
     _updateTimers.erase(p->GetGUID());
     p->ClearTemporaryTeam();
@@ -459,11 +554,8 @@ void CFBG::Update(Player* p, uint32 diff)
     if (itr == _appearances.end()) return;
     uint32& timer = _updateTimers[p->GetGUID()];
     timer += diff; if (timer < 1000) return; timer = 0;
-    if (!itr->second.battlefield)
-    {
-        if (!p->InBattleground()) Restore(p);
-        else Reapply(p, false);
-    }
+    if (!itr->second.battlefield && !p->InBattleground()) { Restore(p); return; }
+    Reapply(p, false);
 }
 
 bool CFBG::IsWG(Battlefield* bf) const
@@ -618,6 +710,7 @@ void CFBG::Debug(ChatHandler* handler, Player* p)
     auto pref = _preferences.find(p->GetGUID());
     handler->PSendSysMessage("CFBG %s: enabled=%u native=%u current=%u BG=%u realRace=%u preference=%u temporary=%u model=%u nativeModel=%u", p->GetName().c_str(), _bgConfig.enabled, uint32(p->GetNativeTeamId()), uint32(p->GetTeamId()), p->GetBGTeam(), uint32(p->getRace()), pref == _preferences.end() ? 0u : uint32(pref->second), p->HasTemporaryTeam(), p->GetDisplayId(), p->GetNativeDisplayId());
     if (state != _appearances.end()) handler->PSendSysMessage("Visual race=%u model=%u originalModel=%u battlefield=%u", uint32(state->second.race), state->second.model, state->second.originalModel, state->second.battlefield);
+    if (state != _appearances.end()) handler->PSendSysMessage("CFBG texture override=%u", state->second.mirrorImageOwned && !state->second.mirrorData.empty());
     auto lock = _warAssignments.find(p->GetGUID());
     if (lock != _warAssignments.end()) handler->PSendSysMessage("Wintergrasp war assignment=%u", uint32(lock->second));
 }

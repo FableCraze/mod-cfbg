@@ -1,11 +1,47 @@
 /* Copyright since 2019 AzerothCore contributors. MIT; see ../LICENSE. */
 #include "CFBG.h"
 #include "ScriptMgr.h"
+#include "WorldPacket.h"
 #include <memory>
+
+namespace
+{
+template<class Script>
+class CFBGScriptLifetime
+{
+public:
+    static void Create()
+    {
+        if (!Handle())
+            Handle() = std::make_unique<Script>();
+    }
+
+    static void Destroyed(Script const* script)
+    {
+        // ScriptMgr deletes registered scripts during Unload. Relinquish the
+        // matching handle from that destructor so there is no second delete.
+        if (Handle().get() == script)
+            Handle().release();
+    }
+
+private:
+    static std::unique_ptr<Script>& Handle()
+    {
+        static std::unique_ptr<Script> script;
+        return script;
+    }
+};
+}
+
 class CFBGPvP : public PvPScript
 {
 public:
     CFBGPvP() : PvPScript("CFBGPvP") { }
+    CFBGPvP(CFBGPvP const&) = delete;
+    CFBGPvP& operator=(CFBGPvP const&) = delete;
+    CFBGPvP(CFBGPvP&&) = delete;
+    CFBGPvP& operator=(CFBGPvP&&) = delete;
+    ~CFBGPvP() override { CFBGScriptLifetime<CFBGPvP>::Destroyed(this); }
     bool SelectBGGroups(BattlegroundQueue* q, Battleground* bg, uint8 b, uint32 min, uint32 max, bool fill) override
     { return CFBG::Instance().SelectGroups(q, bg, b, min, max, fill); }
     bool CanJoinBG(Player* p, Group* g) override { return CFBG::Instance().CanJoin(p, g); }
@@ -28,10 +64,30 @@ public:
     void AfterBFEnd(Battlefield* bf) override { CFBG::Instance().BFEnded(bf); }
     void OnBFKill(Battlefield* bf, Player* p, Unit* v) override { CFBG::Instance().BFKill(bf, p, v); }
 };
+class CFBGNetwork : public ServerScript
+{
+public:
+    CFBGNetwork() : ServerScript("CFBGNetwork") { }
+    CFBGNetwork(CFBGNetwork const&) = delete;
+    CFBGNetwork& operator=(CFBGNetwork const&) = delete;
+    CFBGNetwork(CFBGNetwork&&) = delete;
+    CFBGNetwork& operator=(CFBGNetwork&&) = delete;
+    ~CFBGNetwork() override { CFBGScriptLifetime<CFBGNetwork>::Destroyed(this); }
+    void OnPacketReceive(WorldSocket* socket, WorldPacket& packet) override
+    {
+        if (packet.GetOpcode() == CMSG_GET_MIRROR_IMAGE_DATA)
+            CFBG::Instance().MirrorImageData(socket, packet);
+    }
+};
 class CFBGPlayers : public PlayerScript
 {
 public:
     CFBGPlayers() : PlayerScript("CFBGPlayers") { }
+    CFBGPlayers(CFBGPlayers const&) = delete;
+    CFBGPlayers& operator=(CFBGPlayers const&) = delete;
+    CFBGPlayers(CFBGPlayers&&) = delete;
+    CFBGPlayers& operator=(CFBGPlayers&&) = delete;
+    ~CFBGPlayers() override { CFBGScriptLifetime<CFBGPlayers>::Destroyed(this); }
     void OnLogin(Player* p, bool) override { CFBG::Instance().Login(p); }
     void OnLogout(Player* p) override { CFBG::Instance().Logout(p); }
     void OnDelete(uint64 guid) override { CFBG::Instance().Delete(guid); }
@@ -41,12 +97,17 @@ class CFBGWorld : public WorldScript
 {
 public:
     CFBGWorld() : WorldScript("CFBGWorld") { }
+    CFBGWorld(CFBGWorld const&) = delete;
+    CFBGWorld& operator=(CFBGWorld const&) = delete;
+    CFBGWorld(CFBGWorld&&) = delete;
+    CFBGWorld& operator=(CFBGWorld&&) = delete;
+    ~CFBGWorld() override { CFBGScriptLifetime<CFBGWorld>::Destroyed(this); }
     void OnConfigLoad(bool) override { CFBG::Instance().LoadConfig(); }
 };
 void AddSC_CFBG()
 {
-    // Script constructors register themselves; ScriptMgr owns and deletes them.
-    std::make_unique<CFBGPvP>().release();
-    std::make_unique<CFBGPlayers>().release();
-    std::make_unique<CFBGWorld>().release();
+    CFBGScriptLifetime<CFBGPvP>::Create();
+    CFBGScriptLifetime<CFBGNetwork>::Create();
+    CFBGScriptLifetime<CFBGPlayers>::Create();
+    CFBGScriptLifetime<CFBGWorld>::Create();
 }

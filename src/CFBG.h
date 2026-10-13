@@ -7,6 +7,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <vector>
 class Player;
 class Group;
 class Battleground;
@@ -14,6 +15,8 @@ class BattlegroundQueue;
 class Battlefield;
 class ChatHandler;
 class Unit;
+class WorldSocket;
+class WorldPacket;
 struct GroupQueueInfo;
 struct CFBGAppearance
 {
@@ -24,6 +27,11 @@ struct CFBGAppearance
     bool battlefield;
     int32 frostwolfReaction = -1;
     int32 stormpikeReaction = -1;
+    bool mirrorImageOwned = false;
+    std::vector<uint8> mirrorData;
+    uint64 corpse = 0;
+    uint32 corpseSkin = 0;
+    uint32 corpseFacialHair = 0;
 };
 class CFBG
 {
@@ -40,6 +48,7 @@ public:
     void Restore(Player*);
     void Removed(Battleground*, Player*);
     void Reapply(Player*, bool model = true);
+    void MirrorImageData(WorldSocket*, WorldPacket&);
     void Resurrect(Player*);
     void Login(Player*);
     void Logout(Player*);
@@ -66,6 +75,9 @@ private:
     Player* BalanceCandidate(Battleground*, uint32);
     void PrepareAV(Battleground*);
     uint8 ChooseVisualRace(Player*, TeamId);
+    void RefreshAppearance(Player*, CFBGAppearance&) const;
+    void SendAppearance(Player*, CFBGAppearance&) const;
+    void RefreshCorpseAppearance(Player const*, CFBGAppearance&) const;
     void MoveQueueGroup(BattlegroundQueue*, uint8, GroupQueueInfo*, uint32);
     struct BattlegroundConfig
     {
