@@ -1,12 +1,193 @@
 name: core-build
+
 on:
   push:
-    branches:
-      - 'master'
+    branches: [master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      core_repository:
+        description: SkyFire core repository (owner/name)
+        type: string
+        default: FableCraze/SkyFire_548
+      core_ref:
+        description: SkyFire core branch, tag, or commit
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CORE_REPOSITORY: ${{ inputs.core_repository || 'FableCraze/SkyFire_548' }}
+  CORE_REF: ${{ inputs.core_ref || 'main' }}
+  BUILD_TYPE: Release
+  BUILD_JOBS: '2'
+  BOOST_VERSION: 1.91.0
+  OPENSSL_VERSION: 4.0.0
+  DEPS_DIR: ${{ github.workspace }}/.deps
+  BOOST_ROOT: ${{ github.workspace }}/.deps/boost_1_91_0
+  OPENSSL_ROOT_DIR: ${{ github.workspace }}/.deps/openssl-4.0.0
+  BUILD_DIR: ${{ github.workspace }}/build/skyfire
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
+  CCACHE_SLOPPINESS: pch_defines,time_macros
+  CC: gcc-14
+  CXX: g++-14
 
 jobs:
   build:
-    uses: azerothcore/reusable-workflows/.github/workflows/core_build_modules.yml@f8a150944055bb7e481c0e25eb30be6dbf67a217 # main
-    with:
-      module_repo: ${{ github.event.repository.name }}
+    name: ubuntu-24.04-gcc-14
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out SkyFire core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ env.CORE_REF }}
+          path: skyfire
+          persist-credentials: false
+
+      - name: Check out module under SkyFire
+        uses: actions/checkout@v4
+        with:
+          path: skyfire/modules/mod-cfbg
+          persist-credentials: false
+
+      - name: Check core compatibility
+        run: |
+          set -euo pipefail
+          if ! grep -Eq '^class PvPScript[[:space:]]*:' skyfire/src/server/game/Scripting/ScriptMgr.h; then
+            echo "::error::This module requires the SkyFire PvPScript hooks. Select a core revision containing the port's hooks."
+            exit 1
+          fi
+          {
+            echo "### SkyFire module build"
+            echo "- Core: $CORE_REPOSITORY"
+            echo "- Core revision: $(git -C skyfire rev-parse HEAD)"
+            echo "- Module revision: $(git -C skyfire/modules/mod-cfbg rev-parse HEAD)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Ubuntu dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ca-certificates ccache cmake gcc-14 g++-14 \
+            default-libmysqlclient-dev libbz2-dev libncurses-dev \
+            libreadline-dev ninja-build perl pkg-config wget zlib1g-dev
+          "$CC" --version
+          "$CXX" --version
+
+      - name: Cache Boost
+        id: boost-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BOOST_ROOT }}
+          key: cfbg-ubuntu-24.04-gcc-14-boost-${{ env.BOOST_VERSION }}
+
+      - name: Install Boost
+        if: steps.boost-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEPS_DIR"
+          boost_archive="$RUNNER_TEMP/boost_1_91_0.tar.gz"
+          wget -q "https://archives.boost.io/release/$BOOST_VERSION/source/boost_1_91_0.tar.gz" -O "$boost_archive"
+          tar -xzf "$boost_archive" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/boost_1_91_0"
+          ./bootstrap.sh
+          ./b2 install --prefix="$BOOST_ROOT" --with-headers -j"$BUILD_JOBS"
+
+      - name: Cache OpenSSL
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OPENSSL_ROOT_DIR }}
+          key: cfbg-ubuntu-24.04-gcc-14-openssl-${{ env.OPENSSL_VERSION }}
+
+      - name: Install OpenSSL
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEPS_DIR"
+          openssl_archive="$RUNNER_TEMP/openssl-$OPENSSL_VERSION.tar.gz"
+          wget -q "https://www.openssl.org/source/openssl-$OPENSSL_VERSION.tar.gz" -O "$openssl_archive"
+          tar -xzf "$openssl_archive" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/openssl-$OPENSSL_VERSION"
+          ./Configure linux-x86_64 \
+            --prefix="$OPENSSL_ROOT_DIR" \
+            --openssldir="$OPENSSL_ROOT_DIR/ssl" \
+            shared enable-legacy
+          make -j"$BUILD_JOBS"
+          make install_sw install_ssldirs
+
+      - name: Export dependency paths
+        run: |
+          echo "$OPENSSL_ROOT_DIR/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$OPENSSL_ROOT_DIR/lib64:$OPENSSL_ROOT_DIR/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Cache compiled objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: cfbg-ubuntu-24.04-gcc-14-boost-${{ env.BOOST_VERSION }}-ssl-${{ env.OPENSSL_VERSION }}-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            cfbg-ubuntu-24.04-gcc-14-boost-${{ env.BOOST_VERSION }}-ssl-${{ env.OPENSSL_VERSION }}-
+
+      - name: Configure SkyFire with CFBG
+        run: |
+          set -euo pipefail
+          cmake -S "$GITHUB_WORKSPACE/skyfire" -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSERVERS=ON -DSCRIPTS=ON -DMODULES=ON -DMOD_CFBG=ON \
+            -DAUTH_SERVER=OFF -DTOOLS=OFF -DPACKET_LOG_SERVER=OFF \
+            -DUSE_COREPCH=ON -DUSE_SCRIPTPCH=ON \
+            -DSKYFIRE_BUILD_TESTS=ON \
+            -DBOOST_ROOT="$BOOST_ROOT" \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"
+
+      - name: Build worldserver and PvP tests
+        run: |
+          set -euo pipefail
+          cmake --build "$BUILD_DIR" --parallel "$BUILD_JOBS" \
+            --target worldserver cfbg_balance_tests pvp_team_state_tests pvp_script_hooks_tests \
+            2>&1 | tee "$BUILD_DIR/build.log"
+
+      - name: Run CFBG and PvP tests
+        run: |
+          ctest --test-dir "$BUILD_DIR" \
+            -R '^(cfbg_balance_tests|pvp_team_state_tests|pvp_script_hooks_tests)$' \
+            --no-tests=error --output-on-failure
+
+      - name: Show ccache statistics
+        if: always()
+        run: |
+          if command -v ccache > /dev/null; then
+            ccache --show-stats
+          fi
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skyfire-build-diagnostics
+          if-no-files-found: ignore
+          path: |
+            ${{ env.BUILD_DIR }}/CMakeCache.txt
+            ${{ env.BUILD_DIR }}/CMakeFiles/CMake*.log
+            ${{ env.BUILD_DIR }}/CMakeFiles/CMakeConfigureLog.yaml
+            ${{ env.BUILD_DIR }}/build.log
+            ${{ env.BUILD_DIR }}/Testing/Temporary/*.log

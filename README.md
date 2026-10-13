@@ -50,6 +50,21 @@ They cover formation with a single faction, indivisible groups, odd populations,
 
 Final validation with a 5.4.8 client should cover combat and healing between teams, objectives, graveyards, scoreboard, models, druid forms, resurrection, disconnect/relog, and rewards at battleground/Wintergrasp completion. Automated tests do not replace in-game verification.
 
+## Continuous integration
+
+The `core-build` workflow compiles `worldserver` with this module on Ubuntu 24.04
+using GCC 14, Boost 1.91.0, and OpenSSL 4.0.0, then runs the CFBG balance and PvP
+tests. It uses `FableCraze/SkyFire_548` at `main` while the port's required core
+hooks are being integrated upstream. Each run records the exact core and module
+commits in its summary.
+
+To test another compatible core revision, use **Actions > core-build > Run
+workflow** and set `core_repository` and `core_ref`. After the hooks are merged,
+set `core_repository` to `ProjectSkyfire/SkyFire_548` and `core_ref` to `main`.
+For automatic pushes and pull requests, change the workflow's fallback repository
+and manual input default to the official repository. A core without `PvPScript`
+fails the compatibility check before dependencies are installed.
+
 ## Credits
 
 Winfidonarleyan (Andrei Guluaev), Viste, Irancore, and AzerothCore contributors. The original MIT license is preserved in `LICENSE`.
